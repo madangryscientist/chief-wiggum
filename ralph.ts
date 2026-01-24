@@ -164,8 +164,8 @@ Arguments:
 
 Options:
   --agent AGENT       AI agent to use: opencode (default), claude-code, codex
-  --min-iterations N  Minimum iterations before completion allowed (default: 1)
-  --max-iterations N  Maximum iterations before stopping (default: unlimited)
+
+  --iterations N      Maximum iterations before stopping (default: unlimited)
   --completion-promise TEXT  Phrase that signals completion (default: COMPLETE)
   --tasks, -t         Enable Tasks Mode for structured task tracking (markdown)
   --task-promise TEXT Phrase that signals task completion (default: READY_FOR_NEXT_TASK)
@@ -182,6 +182,8 @@ Options:
 
 Workspace & Structured Tasks:
   --workspace, -w DIR   Run in a different directory (default: current dir)
+  --repo PATH           Git repo to create worktree from (auto-creates worktree)
+  --branch NAME         Branch name for new worktree (default: from prompt title)
   --tasks-file PATH     Use structured markdown tasks file with dependencies,
                         milestones, and verification commands (e.g., docs/tasks.md)
   --milestone, -m NAME  Only process tasks for this milestone (e.g., M2a)
@@ -198,18 +200,21 @@ Commands:
 
 Examples:
   ralph "Build a REST API for todos"
-  ralph "Fix the auth bug" --max-iterations 10
+  ralph "Fix the auth bug" --iterations 10
   ralph "Add tests" --completion-promise "ALL TESTS PASS" --model openai/gpt-5.1
   ralph "Fix the bug" --agent codex --model gpt-5-codex
-  ralph --prompt-file ./prompt.md --max-iterations 5
+  ralph --prompt-file ./prompt.md --iterations 5
   ralph --status                                        # Check loop status
   ralph --add-context "Focus on the auth module first"  # Add hint for next iteration
 
-  # Structured Tasks Mode (task tracking with dependencies)
-  ralph --prompt-file .ralph/prompt.md --tasks-file docs/tasks.md --milestone M2a --log
-  ralph -f prompt.md --tasks-file tasks.md -m M1 --max-iterations 50
+  # Start new work (creates worktree from repo)
+  ralph -f ~/plans/migration.md --repo ~/dev/my-project --tasks-file docs/tasks.md -m M1 -n 50
   
-  # Run in a different workspace
+  # Continue existing work (from within worktree)
+  cd ~/dev/my-project.worktrees/migration
+  ralph -f .ralph/ralph-prompt.md --tasks-file docs/tasks.md -m M2a -n 30
+  
+  # Run in a different workspace (no worktree creation)
   ralph "Migrate the app" --workspace ~/projects/my-app --log
 
 How it works:
@@ -864,6 +869,282 @@ function getStructuredTasksSummary(milestone: string | null): { pending: number;
 }
 
 // ============================================================================
+// Worktree management
+// ============================================================================
+
+/**
+ * Extract worktree name from prompt file's first # heading
+ * "# Zappi-UI Migration" -> "zappi-ui-migration"
+ */
+function extractWorktreeName(promptContent: string): string {
+  const match = promptContent.match(/^#\s+(.+)$/m);
+  if (!match) {
+    console.error("Error: No # heading found in prompt file.");
+    console.error("Add a title like: # My Project Migration");
+    process.exit(1);
+  }
+  
+  // Sanitize: lowercase, replace non-alphanumeric with hyphens, trim hyphens
+  return match[1]
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, "-")
+    .replace(/^-+|-+$/g, "");
+}
+
+/**
+ * Check if a git branch exists (local or remote)
+ */
+async function branchExists(repoDir: string, branch: string): Promise<boolean> {
+  try {
+    // Check local branches
+    const localResult = await $`git -C ${repoDir} branch --list ${branch}`.text();
+    if (localResult.trim()) return true;
+    
+    // Check remote branches
+    const remoteResult = await $`git -C ${repoDir} branch -r --list origin/${branch}`.text();
+    return !!remoteResult.trim();
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Get the default branch (main or master)
+ */
+async function getDefaultBranch(repoDir: string): Promise<string> {
+  try {
+    // Try to get from remote HEAD
+    const result = await $`git -C ${repoDir} symbolic-ref refs/remotes/origin/HEAD 2>/dev/null`.text();
+    const match = result.match(/refs\/remotes\/origin\/(.+)/);
+    if (match) return match[1].trim();
+  } catch {
+    // Ignore
+  }
+  
+  // Fallback: check if main or master exists
+  try {
+    await $`git -C ${repoDir} rev-parse --verify origin/main`.quiet();
+    return "main";
+  } catch {
+    try {
+      await $`git -C ${repoDir} rev-parse --verify origin/master`.quiet();
+      return "master";
+    } catch {
+      console.error("Error: Could not find origin/main or origin/master");
+      process.exit(1);
+    }
+  }
+  return "main"; // TypeScript needs this
+}
+
+/**
+ * Prompt user for confirmation (y/N)
+ */
+async function confirm(message: string): Promise<boolean> {
+  process.stdout.write(`${message} [y/N] `);
+  
+  // Read from stdin
+  const reader = Bun.stdin.stream().getReader();
+  const { value } = await reader.read();
+  reader.releaseLock();
+  
+  const answer = new TextDecoder().decode(value).trim().toLowerCase();
+  return answer === "y" || answer === "yes";
+}
+
+/**
+ * Merge tasks from source into target, preserving completed tasks and avoiding duplicates
+ */
+function mergeTaskFiles(targetPath: string, sourcePath: string): void {
+  if (!existsSync(sourcePath)) return;
+  if (!existsSync(targetPath)) {
+    // Just copy if target doesn't exist
+    const { copyFileSync } = require("fs");
+    copyFileSync(sourcePath, targetPath);
+    return;
+  }
+  
+  const targetContent = readFileSync(targetPath, "utf-8");
+  const sourceContent = readFileSync(sourcePath, "utf-8");
+  
+  const targetTasks = parseStructuredTasks(targetContent);
+  const sourceTasks = parseStructuredTasks(sourceContent);
+  
+  // Find tasks in source that don't exist in target
+  const newTasks: StructuredTask[] = [];
+  for (const [id, task] of sourceTasks.allTasks) {
+    if (!targetTasks.allTasks.has(id)) {
+      newTasks.push(task);
+    }
+  }
+  
+  if (newTasks.length === 0) {
+    console.log("   No new tasks to merge");
+    return;
+  }
+  
+  // Append new tasks to the target file
+  let appendContent = "\n";
+  let currentMilestone: string | null = null;
+  
+  for (const task of newTasks) {
+    // Add milestone header if changed
+    if (task.milestone !== currentMilestone) {
+      currentMilestone = task.milestone;
+      if (currentMilestone) {
+        appendContent += `\n## ${currentMilestone}\n\n`;
+      }
+    }
+    
+    // Add task
+    const statusChar = task.status === "complete" ? "x" : task.status === "in-progress" ? "/" : " ";
+    appendContent += `- [${statusChar}] ${task.id}: ${task.title}\n`;
+    
+    if (task.depends.length > 0) {
+      appendContent += `  - depends: ${task.depends.join(", ")}\n`;
+    }
+    if (task.verify) {
+      appendContent += `  - verify: \`${task.verify}\`\n`;
+    }
+    if (task.started) {
+      appendContent += `  - started: ${task.started}\n`;
+    }
+    if (task.completed) {
+      appendContent += `  - completed: ${task.completed}\n`;
+    }
+    appendContent += "\n";
+  }
+  
+  const { appendFileSync } = require("fs");
+  appendFileSync(targetPath, appendContent);
+  console.log(`   Merged ${newTasks.length} new tasks`);
+}
+
+/**
+ * Create or reuse a git worktree
+ */
+async function setupWorktree(
+  repo: string,
+  promptContent: string,
+  branch: string | null,
+  promptFilePath: string,
+  tasksFilePath: string | null
+): Promise<{ worktreePath: string; promptFile: string; tasksFile: string | null }> {
+  // Validate repo is a git repository
+  if (!existsSync(join(repo, ".git"))) {
+    console.error(`Error: Not a git repository: ${repo}`);
+    process.exit(1);
+  }
+  
+  // Extract worktree name from prompt
+  const worktreeName = extractWorktreeName(promptContent);
+  const worktreePath = `${repo}.worktrees/${worktreeName}`;
+  const effectiveBranch = branch || worktreeName;
+  
+  console.log(`\n📁 Worktree Setup`);
+  console.log(`   Name: ${worktreeName}`);
+  console.log(`   Path: ${worktreePath}`);
+  console.log(`   Branch: ${effectiveBranch}`);
+  
+  // Check if worktree already exists
+  if (existsSync(worktreePath)) {
+    console.log(`   Status: Using existing worktree`);
+    
+    // Check if tasks need merging
+    if (tasksFilePath && existsSync(tasksFilePath)) {
+      const targetTasksPath = join(worktreePath, tasksFilePath);
+      if (existsSync(targetTasksPath)) {
+        console.log(`   Merging tasks...`);
+        mergeTaskFiles(targetTasksPath, tasksFilePath);
+      }
+    }
+    
+    return {
+      worktreePath,
+      promptFile: join(worktreePath, ".ralph", "ralph-prompt.md"),
+      tasksFile: tasksFilePath ? tasksFilePath : null,
+    };
+  }
+  
+  // Fetch latest from remote
+  console.log(`   Fetching from origin...`);
+  try {
+    await $`git -C ${repo} fetch origin`.quiet();
+  } catch (e) {
+    console.error(`   Warning: Could not fetch from origin`);
+  }
+  
+  // Check if branch already exists
+  const branchAlreadyExists = await branchExists(repo, effectiveBranch);
+  
+  if (branchAlreadyExists) {
+    console.log(`   Branch '${effectiveBranch}' already exists.`);
+    const confirmed = await confirm(`   Reuse existing branch?`);
+    if (!confirmed) {
+      console.error("   Aborted. Specify a different branch with --branch");
+      process.exit(1);
+    }
+    
+    // Create worktree from existing branch
+    console.log(`   Creating worktree from existing branch...`);
+    await $`git -C ${repo} worktree add ${worktreePath} ${effectiveBranch}`;
+  } else {
+    // Get default branch
+    const defaultBranch = await getDefaultBranch(repo);
+    console.log(`   Creating new branch from origin/${defaultBranch}...`);
+    
+    // Create worktree directory parent if needed
+    const worktreeParent = join(repo + ".worktrees");
+    if (!existsSync(worktreeParent)) {
+      mkdirSync(worktreeParent, { recursive: true });
+    }
+    
+    // Create worktree with new branch
+    await $`git -C ${repo} worktree add -b ${effectiveBranch} ${worktreePath} origin/${defaultBranch}`;
+  }
+  
+  // Create .ralph directory in worktree
+  const ralphDir = join(worktreePath, ".ralph");
+  if (!existsSync(ralphDir)) {
+    mkdirSync(ralphDir, { recursive: true });
+  }
+  
+  // Copy prompt file
+  const targetPromptPath = join(ralphDir, "ralph-prompt.md");
+  const { copyFileSync } = require("fs");
+  copyFileSync(promptFilePath, targetPromptPath);
+  console.log(`   Copied prompt to .ralph/ralph-prompt.md`);
+  
+  // Copy or merge tasks file
+  let finalTasksFile: string | null = null;
+  if (tasksFilePath && existsSync(tasksFilePath)) {
+    const targetTasksPath = join(worktreePath, tasksFilePath);
+    const targetTasksDir = join(worktreePath, tasksFilePath.split("/").slice(0, -1).join("/"));
+    
+    if (targetTasksDir && !existsSync(targetTasksDir)) {
+      mkdirSync(targetTasksDir, { recursive: true });
+    }
+    
+    if (existsSync(targetTasksPath)) {
+      console.log(`   Merging tasks...`);
+      mergeTaskFiles(targetTasksPath, tasksFilePath);
+    } else {
+      copyFileSync(tasksFilePath, targetTasksPath);
+      console.log(`   Copied tasks to ${tasksFilePath}`);
+    }
+    finalTasksFile = tasksFilePath;
+  }
+  
+  console.log(`   ✅ Worktree ready`);
+  
+  return {
+    worktreePath,
+    promptFile: ".ralph/ralph-prompt.md",
+    tasksFile: finalTasksFile,
+  };
+}
+
+// ============================================================================
 // Logging to file
 // ============================================================================
 
@@ -913,12 +1194,12 @@ function logBoth(message: string): void {
 
 // Parse options
 let prompt = "";
-let minIterations = 1; // default: 1 iteration minimum
+
 let maxIterations = 0; // 0 = unlimited
 let completionPromise = "COMPLETE";
 let tasksMode = false;
 let taskPromise = "READY_FOR_NEXT_TASK";
-let model = "";
+let model = "anthropic/claude-sonnet-4-5";
 let agentType: AgentType = "opencode";
 let autoCommit = true;
 let disablePlugins = false;
@@ -927,6 +1208,10 @@ let promptFile = "";
 let streamOutput = true;
 let verboseTools = false;
 let promptSource = "";
+
+// Repo and worktree options
+let repoPath: string | null = null;
+let branchName: string | null = null;
 
 const promptParts: string[] = [];
 
@@ -940,17 +1225,11 @@ for (let i = 0; i < args.length; i++) {
       process.exit(1);
     }
     agentType = val as AgentType;
-  } else if (arg === "--min-iterations") {
+
+  } else if (arg === "--iterations" || arg === "--max-iterations" || arg === "-n") {
     const val = args[++i];
     if (!val || isNaN(parseInt(val))) {
-      console.error("Error: --min-iterations requires a number");
-      process.exit(1);
-    }
-    minIterations = parseInt(val);
-  } else if (arg === "--max-iterations") {
-    const val = args[++i];
-    if (!val || isNaN(parseInt(val))) {
-      console.error("Error: --max-iterations requires a number");
+      console.error("Error: --iterations requires a number");
       process.exit(1);
     }
     maxIterations = parseInt(val);
@@ -1012,6 +1291,20 @@ for (let i = 0; i < args.length; i++) {
   } else if (arg === "--log" || arg === "--log-file") {
     // Enable logging - will auto-generate filename
     logFilePath = "auto";
+  } else if (arg === "--repo") {
+    const val = args[++i];
+    if (!val) {
+      console.error("Error: --repo requires a directory path");
+      process.exit(1);
+    }
+    repoPath = val;
+  } else if (arg === "--branch") {
+    const val = args[++i];
+    if (!val) {
+      console.error("Error: --branch requires a branch name");
+      process.exit(1);
+    }
+    branchName = val;
   } else if (arg === "--no-stream") {
     streamOutput = false;
   } else if (arg === "--stream") {
@@ -1080,16 +1373,44 @@ if (!prompt) {
   process.exit(1);
 }
 
-// Validate min/max iterations
-if (maxIterations > 0 && minIterations > maxIterations) {
-  console.error(`Error: --min-iterations (${minIterations}) cannot be greater than --max-iterations (${maxIterations})`);
-  process.exit(1);
-}
+// Handle --repo flag: setup worktree if needed
+// This is done as an async IIFE since we need to await git commands
+const worktreeSetupPromise = (async () => {
+  if (repoPath) {
+    if (!promptFile && !promptSource) {
+      console.error("Error: --repo requires --prompt-file (-f) to extract worktree name from");
+      process.exit(1);
+    }
+    
+    const result = await setupWorktree(
+      repoPath,
+      prompt,
+      branchName,
+      promptSource || promptFile,
+      structuredTasksFile
+    );
+    
+    // Update paths to point to worktree
+    workspaceRoot = result.worktreePath;
+    promptFile = result.promptFile;
+    promptSource = result.promptFile;
+    if (result.tasksFile) {
+      structuredTasksFile = result.tasksFile;
+    }
+    
+    // Re-read prompt from new location (it's now in the worktree)
+    const newPromptPath = join(workspaceRoot, promptFile);
+    if (existsSync(newPromptPath)) {
+      prompt = readFileSync(newPromptPath, "utf-8");
+    }
+  }
+})();
+
 
 interface RalphState {
   active: boolean;
   iteration: number;
-  minIterations: number;
+
   maxIterations: number;
   completionPromise: string;
   tasksMode: boolean;
@@ -1300,7 +1621,7 @@ ${state.prompt}
 - If stuck, try a different approach
 - Check your work before claiming completion
 
-## Current Iteration: ${state.iteration}${state.maxIterations > 0 ? ` / ${state.maxIterations}` : " (unlimited)"} (min: ${state.minIterations ?? 1})
+## Current Iteration: ${state.iteration}${state.maxIterations > 0 ? ` / ${state.maxIterations}` : " (unlimited)"}
 
 Tasks Mode: ENABLED - Work on one task at a time from ralph-tasks.md
 
@@ -1335,7 +1656,7 @@ ${state.prompt}
 - Check your work before claiming completion
 - The loop will continue until you succeed
 
-## Current Iteration: ${state.iteration}${state.maxIterations > 0 ? ` / ${state.maxIterations}` : " (unlimited)"} (min: ${state.minIterations ?? 1})
+## Current Iteration: ${state.iteration}${state.maxIterations > 0 ? ` / ${state.maxIterations}` : " (unlimited)"}
 
 Now, work on the task. Good luck!
 `.trim();
@@ -1831,7 +2152,7 @@ async function runRalphLoop(): Promise<void> {
   const state: RalphState = {
     active: true,
     iteration: 1,
-    minIterations,
+
     maxIterations,
     completionPromise,
     tasksMode,
@@ -1891,8 +2212,8 @@ async function runRalphLoop(): Promise<void> {
       console.log(`Next task: ${nextTask.id} - ${nextTask.title}`);
     }
   }
-  console.log(`Min iterations: ${minIterations}`);
-  console.log(`Max iterations: ${maxIterations > 0 ? maxIterations : "unlimited"}`);
+
+  console.log(`Iterations: ${maxIterations > 0 ? maxIterations : "unlimited"}`);
   console.log(`Agent: ${agentConfig.configName}`);
   if (model) console.log(`Model: ${model}`);
   if (disablePlugins && agentConfig.type === "opencode") {
@@ -1945,8 +2266,7 @@ async function runRalphLoop(): Promise<void> {
     }
 
     const iterInfo = maxIterations > 0 ? ` / ${maxIterations}` : "";
-    const minInfo = minIterations > 1 && state.iteration < minIterations ? ` (min: ${minIterations})` : "";
-    console.log(`\n🔄 Iteration ${state.iteration}${iterInfo}${minInfo}`);
+    console.log(`\n🔄 Iteration ${state.iteration}${iterInfo}`);
     
     // Show structured task info if enabled
     if (state.structuredTasksFile) {
@@ -2115,21 +2435,15 @@ async function runRalphLoop(): Promise<void> {
 
       // Check for full completion
       if (completionDetected) {
-        if (state.iteration < minIterations) {
-          // Completion detected but minimum iterations not reached
-          console.log(`\n⏳ Completion promise detected, but minimum iterations (${minIterations}) not yet reached.`);
-          console.log(`   Continuing to iteration ${state.iteration + 1}...`);
-        } else {
-          console.log(`\n╔══════════════════════════════════════════════════════════════════╗`);
-          console.log(`║  ✅ Completion promise detected: <promise>${completionPromise}</promise>`);
-          console.log(`║  Task completed in ${state.iteration} iteration(s)`);
-          console.log(`║  Total time: ${formatDurationLong(history.totalDurationMs)}`);
-          console.log(`╚══════════════════════════════════════════════════════════════════╝`);
-          clearState();
-          clearHistory();
-          clearContext();
-          break;
-        }
+        console.log(`\n╔══════════════════════════════════════════════════════════════════╗`);
+        console.log(`║  ✅ Completion promise detected: <promise>${completionPromise}</promise>`);
+        console.log(`║  Task completed in ${state.iteration} iteration(s)`);
+        console.log(`║  Total time: ${formatDurationLong(history.totalDurationMs)}`);
+        console.log(`╚══════════════════════════════════════════════════════════════════╝`);
+        clearState();
+        clearHistory();
+        clearContext();
+        break;
       }
 
       // Clear context only if it was present at iteration start (preserve mid-iteration additions)
@@ -2197,9 +2511,11 @@ async function runRalphLoop(): Promise<void> {
   }
 }
 
-// Run the loop
-runRalphLoop().catch(error => {
-  console.error("Fatal error:", error);
-  clearState();
-  process.exit(1);
-});
+// Wait for worktree setup then run the loop
+worktreeSetupPromise
+  .then(() => runRalphLoop())
+  .catch(error => {
+    console.error("Fatal error:", error);
+    clearState();
+    process.exit(1);
+  });
