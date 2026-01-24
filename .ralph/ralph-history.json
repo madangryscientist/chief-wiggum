@@ -1,0 +1,27 @@
+{
+  "iterations": [
+    {
+      "iteration": 1,
+      "startedAt": "2026-01-24T20:37:22.757Z",
+      "endedAt": "2026-01-24T20:37:29.880Z",
+      "durationMs": 6262,
+      "toolsUsed": {},
+      "filesModified": [
+        ".ralph/"
+      ],
+      "exitCode": 1,
+      "completionDetected": false,
+      "errors": [
+        "\u001b[91m\u001b[1mError: \u001b[0mError: AWS credential provider failed: Token is expired. To refresh this SSO session run 'aws sso login' with the corresponding profile.. Please ensure your credential provider ret"
+      ]
+    }
+  ],
+  "totalDurationMs": 6262,
+  "struggleIndicators": {
+    "repeatedErrors": {
+      "\u001b[91m\u001b[1mError: \u001b[0mError: AWS credential provider failed: Token is expired. To refresh this SSO ses": 1
+    },
+    "noProgressIterations": 0,
+    "shortIterations": 1
+  }
+}

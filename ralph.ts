@@ -10,16 +10,60 @@ import { $ } from "bun";
 import { existsSync, readFileSync, writeFileSync, mkdirSync, statSync } from "fs";
 import { join } from "path";
 
-const VERSION = "1.0.9";
+const VERSION = "1.1.0";
 
-// Context file path for mid-loop injection
-const stateDir = join(process.cwd(), ".ralph");
-const statePath = join(stateDir, "ralph-loop.state.json");
-const contextPath = join(stateDir, "ralph-context.md");
-const historyPath = join(stateDir, "ralph-history.json");
-const tasksPath = join(stateDir, "ralph-tasks.md");
+// Workspace support - can be overridden via --workspace
+let workspaceRoot = process.cwd();
+
+// Context file path for mid-loop injection (computed after workspace is set)
+function getStateDir() {
+  return join(workspaceRoot, ".ralph");
+}
+function getStatePath() {
+  return join(getStateDir(), "ralph-loop.state.json");
+}
+function getContextPath() {
+  return join(getStateDir(), "ralph-context.md");
+}
+function getHistoryPath() {
+  return join(getStateDir(), "ralph-history.json");
+}
+function getTasksPath() {
+  return join(getStateDir(), "ralph-tasks.md");
+}
+function getLogDir() {
+  return join(getStateDir(), "logs");
+}
+
+// Legacy aliases for backward compatibility
+const stateDir = getStateDir();
+const statePath = getStatePath();
+const contextPath = getContextPath();
+const historyPath = getHistoryPath();
+const tasksPath = getTasksPath();
 
 type AgentType = "opencode" | "claude-code" | "codex";
+
+// Structured markdown task (with dependencies, verification, timing)
+interface StructuredTask {
+  id: string;
+  title: string;
+  milestone: string | null;
+  status: "todo" | "in-progress" | "complete";
+  depends: string[];
+  verify: string | null;
+  started: string | null;
+  completed: string | null;
+  originalLines: string[]; // For reconstruction
+}
+
+interface ParsedTasksFile {
+  milestones: Map<string, StructuredTask[]>;
+  allTasks: Map<string, StructuredTask>;
+}
+
+// Log file for session output
+let logFilePath: string | null = null;
 
 type AgentEnvOptions = { filterPlugins?: boolean; allowAllPermissions?: boolean };
 
@@ -123,7 +167,7 @@ Options:
   --min-iterations N  Minimum iterations before completion allowed (default: 1)
   --max-iterations N  Maximum iterations before stopping (default: unlimited)
   --completion-promise TEXT  Phrase that signals completion (default: COMPLETE)
-  --tasks, -t         Enable Tasks Mode for structured task tracking
+  --tasks, -t         Enable Tasks Mode for structured task tracking (markdown)
   --task-promise TEXT Phrase that signals task completion (default: READY_FOR_NEXT_TASK)
   --model MODEL       Model to use (agent-specific, e.g., anthropic/claude-sonnet)
   --prompt-file, --file, -f  Read prompt content from a file
@@ -135,6 +179,13 @@ Options:
   --no-allow-all      Require interactive permission prompts
   --version, -v       Show version
   --help, -h          Show this help
+
+Workspace & Structured Tasks:
+  --workspace, -w DIR   Run in a different directory (default: current dir)
+  --tasks-file PATH     Use structured markdown tasks file with dependencies,
+                        milestones, and verification commands (e.g., docs/tasks.md)
+  --milestone, -m NAME  Only process tasks for this milestone (e.g., M2a)
+  --log                 Enable logging all output to .ralph/logs/
 
 Commands:
   --status            Show current Ralph loop status and history
@@ -153,6 +204,13 @@ Examples:
   ralph --prompt-file ./prompt.md --max-iterations 5
   ralph --status                                        # Check loop status
   ralph --add-context "Focus on the auth module first"  # Add hint for next iteration
+
+  # Structured Tasks Mode (task tracking with dependencies)
+  ralph --prompt-file .ralph/prompt.md --tasks-file docs/tasks.md --milestone M2a --log
+  ralph -f prompt.md --tasks-file tasks.md -m M1 --max-iterations 50
+  
+  # Run in a different workspace
+  ralph "Migrate the app" --workspace ~/projects/my-app --log
 
 How it works:
   1. Sends your prompt to the selected AI agent
@@ -613,6 +671,246 @@ function allTasksComplete(tasks: Task[]): boolean {
   return tasks.length > 0 && tasks.every(t => t.status === "complete");
 }
 
+// ============================================================================
+// Structured Markdown Tasks - Task tracking with dependencies and verification
+// ============================================================================
+
+let structuredTasksFile: string | null = null;
+let milestoneFilter: string | null = null;
+
+/**
+ * Parse structured markdown tasks file
+ * 
+ * Format:
+ * ## M1: Milestone Name
+ * 
+ * - [x] task-001: Task title here
+ *   - depends: task-000
+ *   - verify: `command to run`
+ *   - started: 2026-01-24T19:00:00Z
+ *   - completed: 2026-01-24T19:05:00Z
+ * 
+ * - [ ] task-002: Another task
+ *   - depends: task-001
+ *   - verify: `npm test`
+ */
+function parseStructuredTasks(content: string): ParsedTasksFile {
+  const milestones = new Map<string, StructuredTask[]>();
+  const allTasks = new Map<string, StructuredTask>();
+  const lines = content.split("\n");
+  
+  let currentMilestone: string | null = null;
+  let currentTask: StructuredTask | null = null;
+  let taskLines: string[] = [];
+
+  const saveCurrentTask = () => {
+    if (currentTask) {
+      currentTask.originalLines = [...taskLines];
+      allTasks.set(currentTask.id, currentTask);
+      if (currentMilestone) {
+        const tasks = milestones.get(currentMilestone) || [];
+        tasks.push(currentTask);
+        milestones.set(currentMilestone, tasks);
+      }
+    }
+    currentTask = null;
+    taskLines = [];
+  };
+
+  for (const line of lines) {
+    // Milestone header: ## M1: Name or ## M1
+    const milestoneMatch = line.match(/^##\s+(\S+)(?::\s*(.*))?$/);
+    if (milestoneMatch) {
+      saveCurrentTask();
+      currentMilestone = milestoneMatch[1];
+      if (!milestones.has(currentMilestone)) {
+        milestones.set(currentMilestone, []);
+      }
+      continue;
+    }
+
+    // Task line: - [ ] id: title or - [x] id: title or - [/] id: title
+    const taskMatch = line.match(/^-\s+\[([ x\/])\]\s+([a-zA-Z0-9_-]+):\s*(.+)$/);
+    if (taskMatch) {
+      saveCurrentTask();
+      const [, statusChar, id, title] = taskMatch;
+      let status: StructuredTask["status"] = "todo";
+      if (statusChar === "x") status = "complete";
+      else if (statusChar === "/") status = "in-progress";
+
+      currentTask = {
+        id,
+        title,
+        milestone: currentMilestone,
+        status,
+        depends: [],
+        verify: null,
+        started: null,
+        completed: null,
+        originalLines: [],
+      };
+      taskLines = [line];
+      continue;
+    }
+
+    // Metadata line (indented under task): - key: value
+    if (currentTask && line.match(/^\s+-\s+\w+:/)) {
+      taskLines.push(line);
+      
+      const dependsMatch = line.match(/^\s+-\s+depends:\s*(.+)$/);
+      if (dependsMatch) {
+        currentTask.depends = dependsMatch[1].split(/[,\s]+/).filter(Boolean);
+        continue;
+      }
+
+      const verifyMatch = line.match(/^\s+-\s+verify:\s*`?([^`]+)`?$/);
+      if (verifyMatch) {
+        currentTask.verify = verifyMatch[1].trim();
+        continue;
+      }
+
+      const startedMatch = line.match(/^\s+-\s+started:\s*(.+)$/);
+      if (startedMatch) {
+        currentTask.started = startedMatch[1].trim();
+        continue;
+      }
+
+      const completedMatch = line.match(/^\s+-\s+completed:\s*(.+)$/);
+      if (completedMatch) {
+        currentTask.completed = completedMatch[1].trim();
+        continue;
+      }
+    }
+  }
+
+  saveCurrentTask();
+  return { milestones, allTasks };
+}
+
+function loadStructuredTasks(): ParsedTasksFile | null {
+  if (!structuredTasksFile) return null;
+  const fullPath = join(workspaceRoot, structuredTasksFile);
+  if (!existsSync(fullPath)) {
+    return null;
+  }
+  try {
+    const content = readFileSync(fullPath, "utf-8");
+    return parseStructuredTasks(content);
+  } catch {
+    return null;
+  }
+}
+
+function countStructuredTasks(milestone: string | null, status: StructuredTask["status"]): number {
+  const data = loadStructuredTasks();
+  if (!data) return 0;
+  
+  let tasks: StructuredTask[];
+  if (milestone) {
+    tasks = data.milestones.get(milestone) || [];
+  } else {
+    tasks = Array.from(data.allTasks.values());
+  }
+  
+  return tasks.filter((t) => t.status === status).length;
+}
+
+function getNextStructuredTask(milestone: string | null): StructuredTask | null {
+  const data = loadStructuredTasks();
+  if (!data) return null;
+
+  let tasks: StructuredTask[];
+  if (milestone) {
+    tasks = data.milestones.get(milestone) || [];
+  } else {
+    tasks = Array.from(data.allTasks.values());
+  }
+
+  for (const task of tasks) {
+    if (task.status !== "todo" && task.status !== "in-progress") continue;
+
+    // Check dependencies
+    const allDepsComplete = task.depends.every((depId) => {
+      const dep = data.allTasks.get(depId);
+      return dep?.status === "complete";
+    });
+    
+    if (allDepsComplete) {
+      return task;
+    }
+  }
+  return null;
+}
+
+function allStructuredTasksComplete(milestone: string | null): boolean {
+  const data = loadStructuredTasks();
+  if (!data) return false;
+  
+  let tasks: StructuredTask[];
+  if (milestone) {
+    tasks = data.milestones.get(milestone) || [];
+  } else {
+    tasks = Array.from(data.allTasks.values());
+  }
+  
+  return tasks.length > 0 && tasks.every((t) => t.status === "complete");
+}
+
+function getStructuredTasksSummary(milestone: string | null): { pending: number; inProgress: number; completed: number; total: number } {
+  const pending = countStructuredTasks(milestone, "todo");
+  const inProgress = countStructuredTasks(milestone, "in-progress");
+  const completed = countStructuredTasks(milestone, "complete");
+  return { pending, inProgress, completed, total: pending + inProgress + completed };
+}
+
+// ============================================================================
+// Logging to file
+// ============================================================================
+
+function initLogFile(): void {
+  if (!logFilePath) return;
+  
+  const logDir = getLogDir();
+  if (!existsSync(logDir)) {
+    mkdirSync(logDir, { recursive: true });
+  }
+  
+  const timestamp = new Date().toISOString().replace(/[:.]/g, "-").slice(0, 19);
+  const milestone = milestoneFilter || "all";
+  const fullLogPath = join(logDir, `${milestone}-${timestamp}.log`);
+  
+  // Store for later use
+  logFilePath = fullLogPath;
+  
+  // Write header
+  const header = `==========================================
+Ralph Wiggum Session Log
+==========================================
+Started:      ${new Date().toLocaleString()}
+Milestone:    ${milestoneFilter || "ALL"}
+Working Dir:  ${workspaceRoot}
+Tasks File:   ${structuredTasksFile || "N/A"}
+==========================================
+
+`;
+  writeFileSync(fullLogPath, header);
+}
+
+function logToFile(message: string): void {
+  if (!logFilePath || !existsSync(logFilePath)) return;
+  try {
+    const { appendFileSync } = require("fs");
+    appendFileSync(logFilePath, message);
+  } catch {
+    // Ignore logging errors
+  }
+}
+
+function logBoth(message: string): void {
+  console.log(message);
+  logToFile(stripAnsi(message) + "\n");
+}
+
 // Parse options
 let prompt = "";
 let minIterations = 1; // default: 1 iteration minimum
@@ -686,6 +984,34 @@ for (let i = 0; i < args.length; i++) {
       process.exit(1);
     }
     promptFile = val;
+  } else if (arg === "--workspace" || arg === "-w") {
+    const val = args[++i];
+    if (!val) {
+      console.error("Error: --workspace requires a directory path");
+      process.exit(1);
+    }
+    if (!existsSync(val)) {
+      console.error(`Error: Workspace directory does not exist: ${val}`);
+      process.exit(1);
+    }
+    workspaceRoot = val;
+  } else if (arg === "--tasks-file") {
+    const val = args[++i];
+    if (!val) {
+      console.error("Error: --tasks-file requires a file path");
+      process.exit(1);
+    }
+    structuredTasksFile = val;
+  } else if (arg === "--milestone" || arg === "-m") {
+    const val = args[++i];
+    if (!val) {
+      console.error("Error: --milestone requires a value");
+      process.exit(1);
+    }
+    milestoneFilter = val;
+  } else if (arg === "--log" || arg === "--log-file") {
+    // Enable logging - will auto-generate filename
+    logFilePath = "auto";
   } else if (arg === "--no-stream") {
     streamOutput = false;
   } else if (arg === "--stream") {
@@ -772,22 +1098,30 @@ interface RalphState {
   startedAt: string;
   model: string;
   agent: AgentType;
+  // New fields for workspace and structured tasks
+  workspaceRoot?: string;
+  structuredTasksFile?: string | null;
+  milestoneFilter?: string | null;
+  logFile?: string | null;
 }
 
 // Create or update state
 function saveState(state: RalphState): void {
-  if (!existsSync(stateDir)) {
-    mkdirSync(stateDir, { recursive: true });
+  const dir = getStateDir();
+  const path = getStatePath();
+  if (!existsSync(dir)) {
+    mkdirSync(dir, { recursive: true });
   }
-  writeFileSync(statePath, JSON.stringify(state, null, 2));
+  writeFileSync(path, JSON.stringify(state, null, 2));
 }
 
 function loadState(): RalphState | null {
-  if (!existsSync(statePath)) {
+  const path = getStatePath();
+  if (!existsSync(path)) {
     return null;
   }
   try {
-    return JSON.parse(readFileSync(statePath, "utf-8"));
+    return JSON.parse(readFileSync(path, "utf-8"));
   } catch {
     return null;
   }
@@ -913,7 +1247,39 @@ ${context}
 `
     : "";
 
-  // Tasks mode: use task-specific instructions
+  // Structured Tasks mode: task tracking with dependencies and verification
+  if (state.structuredTasksFile) {
+    const tasksSection = getStructuredTasksModeSection(state);
+    return `
+# Ralph Wiggum Loop - Iteration ${state.iteration}
+
+You are in an iterative development loop working through a structured task list.
+${contextSection}${tasksSection}
+## Your Main Goal
+
+${state.prompt}
+
+## Critical Rules
+
+- Work on ONE task at a time from ${state.structuredTasksFile}
+- When starting a task: change [ ] to [/] and add "- started: <ISO timestamp>"
+- When completing a task: change [/] to [x] and add "- completed: <ISO timestamp>"
+- Run the verification command in the task's "verify" field before marking complete
+- Commit your changes after completing each task
+- ONLY output <promise>${state.taskPromise}</promise> when the current task is verified complete
+- ONLY output <promise>${state.completionPromise}</promise> when ALL tasks for milestone ${state.milestoneFilter || "ALL"} are complete
+- Do NOT lie or output false promises to exit the loop
+- If stuck, try a different approach
+
+## Current Iteration: ${state.iteration}${state.maxIterations > 0 ? ` / ${state.maxIterations}` : " (unlimited)"}
+
+Structured Tasks Mode: ENABLED${state.milestoneFilter ? ` (Milestone: ${state.milestoneFilter})` : ""}
+
+Now, work on the current task. Good luck!
+`.trim();
+  }
+
+  // Markdown Tasks mode: use task-specific instructions
   if (state.tasksMode) {
     const tasksSection = getTasksModeSection(state);
     return `
@@ -1037,6 +1403,105 @@ ${taskInstructions}
 Unable to read .ralph/ralph-tasks.md
 `;
   }
+}
+
+// Generate the structured tasks mode section for the prompt
+function getStructuredTasksModeSection(state: RalphState): string {
+  const data = loadStructuredTasks();
+  if (!data) {
+    return `
+## STRUCTURED TASKS MODE: No tasks file found
+
+Tasks file not found: ${state.structuredTasksFile}
+
+Create a structured markdown tasks file with this format:
+
+\`\`\`markdown
+# Tasks
+
+## M1: Setup
+
+- [ ] task-001: Create project directory
+  - verify: \`ls -la project/\`
+
+- [ ] task-002: Initialize npm
+  - depends: task-001
+  - verify: \`cat project/package.json\`
+
+## M2: Implementation
+
+- [ ] task-003: Add main module
+  - depends: task-002
+  - verify: \`node project/index.js\`
+\`\`\`
+`;
+  }
+
+  const milestone = state.milestoneFilter;
+  const summary = getStructuredTasksSummary(milestone);
+  const nextTask = getNextStructuredTask(milestone);
+  const allComplete = allStructuredTasksComplete(milestone);
+
+  // Build task list for display
+  let tasks: StructuredTask[];
+  if (milestone) {
+    tasks = data.milestones.get(milestone) || [];
+  } else {
+    tasks = Array.from(data.allTasks.values());
+  }
+  
+  const taskList = tasks.map((t) => {
+    const statusIcon = t.status === "complete" ? "✅" : t.status === "in-progress" ? "🔄" : "⏸️";
+    const deps = t.depends.length ? ` (depends: ${t.depends.join(", ")})` : "";
+    return `${statusIcon} ${t.id}: ${t.title}${deps}`;
+  }).join("\n");
+
+  let taskInstructions = "";
+  if (allComplete) {
+    taskInstructions = `
+✅ ALL TASKS COMPLETE!
+   Output <promise>${state.completionPromise}</promise> to finish.`;
+  } else if (nextTask) {
+    taskInstructions = `
+📍 NEXT TASK: ${nextTask.id}
+   Title: "${nextTask.title}"
+   ${nextTask.verify ? `Verify: \`${nextTask.verify}\`` : ""}
+   ${nextTask.depends.length ? `Dependencies: ${nextTask.depends.join(", ")} (all completed)` : ""}
+   
+   1. Change [ ] to [/] for this task in ${state.structuredTasksFile}
+   2. Add "- started: ${new Date().toISOString()}" under the task
+   3. Complete the work
+   4. Run verification: ${nextTask.verify || "(no verification command)"}
+   5. Change [/] to [x] and add "- completed: <timestamp>"
+   6. Commit changes
+   7. Output <promise>${state.taskPromise}</promise>`;
+  } else {
+    taskInstructions = `
+⏳ No available tasks. Check dependencies - some tasks may be blocked.`;
+  }
+
+  return `
+## STRUCTURED TASKS MODE: ${milestone ? `Milestone ${milestone}` : "All Tasks"}
+
+**Summary:** ${summary.completed}/${summary.total} complete, ${summary.inProgress} in progress, ${summary.pending} pending
+
+**Tasks:**
+${taskList}
+${taskInstructions}
+
+### Task Workflow
+1. Read ${state.structuredTasksFile} to find the next available task
+2. Task must be marked [ ] and all dependencies must be [x]
+3. Mark task as in-progress: change [ ] to [/], add "- started: <ISO timestamp>"
+4. Do the work described in the task title
+5. Run the verification command in the "verify" field
+6. Mark task as complete: change [/] to [x], add "- completed: <ISO timestamp>"
+7. Commit: git add . && git commit -m "chore: complete TASK_ID - title"
+8. Output <promise>${state.taskPromise}</promise> to signal task completion
+9. When ALL tasks are complete, output <promise>${state.completionPromise}</promise>
+
+---
+`;
 }
 
 // Check if output contains the completion promise
@@ -1357,6 +1822,11 @@ async function runRalphLoop(): Promise<void> {
 ╚══════════════════════════════════════════════════════════════════╝
 `);
 
+  // Initialize log file if enabled
+  if (logFilePath === "auto") {
+    initLogFile();
+  }
+
   // Initialize state
   const state: RalphState = {
     active: true,
@@ -1370,17 +1840,23 @@ async function runRalphLoop(): Promise<void> {
     startedAt: new Date().toISOString(),
     model,
     agent: agentType,
+    workspaceRoot,
+    structuredTasksFile,
+    milestoneFilter,
+    logFile: logFilePath,
   };
 
   saveState(state);
 
-  // Create tasks file if tasks mode is enabled and file doesn't exist
-  if (tasksMode && !existsSync(tasksPath)) {
-    if (!existsSync(stateDir)) {
-      mkdirSync(stateDir, { recursive: true });
+  // Create markdown tasks file if tasks mode is enabled and file doesn't exist
+  const mdTasksPath = getTasksPath();
+  const stateDirectory = getStateDir();
+  if (tasksMode && !existsSync(mdTasksPath)) {
+    if (!existsSync(stateDirectory)) {
+      mkdirSync(stateDirectory, { recursive: true });
     }
-    writeFileSync(tasksPath, "# Ralph Tasks\n\nAdd your tasks here:\n- [ ] Example task\n");
-    console.log(`📋 Created tasks file: ${tasksPath}`);
+    writeFileSync(mdTasksPath, "# Ralph Tasks\n\nAdd your tasks here:\n- [ ] Example task\n");
+    console.log(`📋 Created tasks file: ${mdTasksPath}`);
   }
 
   // Initialize history tracking

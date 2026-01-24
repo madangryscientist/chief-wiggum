@@ -148,7 +148,7 @@ Options:
 Tasks Mode allows you to break complex projects into smaller, manageable tasks. Ralph works on one task at a time and tracks progress in a markdown file.
 
 ```bash
-# Enable Tasks Mode
+# Enable Tasks Mode (simple markdown tasks)
 ralph "Build a complete web application" --tasks --max-iterations 20
 
 # Custom task completion signal
@@ -195,6 +195,79 @@ Example task file:
   - [ ] Add JWT handling
 - [ ] Build dashboard UI
 ```
+
+### Structured Tasks Mode
+
+For complex projects with dependencies, milestones, and verification commands, use Structured Tasks Mode with `--tasks-file`:
+
+```bash
+# Run with structured tasks and milestone filter
+ralph -f prompt.md --tasks-file docs/tasks.md --milestone M2a --max-iterations 50
+
+# Run in a different workspace with logging
+ralph "Migrate the app" --workspace ~/projects/my-app --tasks-file tasks.md --log
+```
+
+#### Structured Tasks Options
+
+```bash
+--workspace, -w DIR   Run in a different directory (default: current dir)
+--tasks-file PATH     Path to structured markdown tasks file
+--milestone, -m NAME  Only process tasks for this milestone (e.g., M2a)
+--log                 Enable logging all output to .ralph/logs/
+```
+
+#### Structured Tasks Format
+
+Tasks can have dependencies (won't start until deps are complete), verification commands, and timing metadata:
+
+```markdown
+# Project Tasks
+
+## M1: Setup
+
+- [x] m1-001: Create project directory
+  - verify: `ls -la project/`
+  - started: 2026-01-24T10:00:00Z
+  - completed: 2026-01-24T10:05:00Z
+
+- [x] m1-002: Initialize npm
+  - depends: m1-001
+  - verify: `cat project/package.json`
+  - started: 2026-01-24T10:06:00Z
+  - completed: 2026-01-24T10:10:00Z
+
+## M2a: Implementation
+
+- [/] m2a-001: Setup Tailwind
+  - verify: `npx tailwindcss --help`
+  - started: 2026-01-24T11:00:00Z
+
+- [ ] m2a-002: Configure build
+  - depends: m2a-001
+  - verify: `npm run build`
+
+- [ ] m2a-003: Add tests
+  - depends: m2a-001, m2a-002
+  - verify: `npm test`
+```
+
+**Format rules:**
+- Milestones: `## MILESTONE_ID: Optional Name`
+- Tasks: `- [ ] task-id: Task description`
+- Status: `[ ]` (todo), `[/]` (in-progress), `[x]` (complete)
+- Dependencies: `- depends: task-id1, task-id2`
+- Verification: `- verify: \`command to run\``
+- Timing: `- started: ISO-timestamp` and `- completed: ISO-timestamp`
+
+**How it works:**
+1. Ralph finds the next task with all dependencies completed
+2. Changes `[ ]` to `[/]` and adds `started` timestamp
+3. Completes the work
+4. Runs the verification command
+5. Changes `[/]` to `[x]` and adds `completed` timestamp
+6. Commits changes and outputs `<promise>READY_FOR_NEXT_TASK</promise>`
+7. When all tasks for milestone are complete, outputs `<promise>COMPLETE</promise>`
 
 ### Monitoring & Control
 
@@ -473,6 +546,7 @@ During operation, Ralph stores state in `.ralph/`:
 - `ralph-history.json` - Iteration history and metrics
 - `ralph-context.md` - Pending context for next iteration
 - `ralph-tasks.md` - Task list for Tasks Mode (created when `--tasks` is used)
+- `logs/` - Session logs (when `--log` is enabled)
 
 ## Uninstall
 
