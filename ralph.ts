@@ -31,6 +31,9 @@ function getHistoryPath() {
 function getTasksPath() {
   return join(getStateDir(), "ralph-tasks.md");
 }
+function getSuggestedTasksPath() {
+  return join(getStateDir(), "suggested-tasks.md");
+}
 function getLogDir() {
   return join(getStateDir(), "logs");
 }
@@ -869,6 +872,58 @@ function getStructuredTasksSummary(milestone: string | null): { pending: number;
 }
 
 // ============================================================================
+// Suggested tasks
+// ============================================================================
+
+/**
+ * Parse suggested tasks from agent output
+ * Format: <suggest-task>task description</suggest-task>
+ * Or: <suggest-task milestone="M2a">task description</suggest-task>
+ */
+function parseSuggestedTasks(output: string): Array<{ task: string; milestone: string | null }> {
+  const suggestions: Array<{ task: string; milestone: string | null }> = [];
+  const regex = /<suggest-task(?:\s+milestone="([^"]*)")?\s*>([\s\S]*?)<\/suggest-task>/g;
+  let match;
+  while ((match = regex.exec(output)) !== null) {
+    const milestone = match[1] || null;
+    const task = match[2].trim();
+    if (task) {
+      suggestions.push({ task, milestone });
+    }
+  }
+  return suggestions;
+}
+
+/**
+ * Append suggested tasks to the suggested-tasks.md file
+ */
+function appendSuggestedTasks(suggestions: Array<{ task: string; milestone: string | null }>, iteration: number): void {
+  if (suggestions.length === 0) return;
+  
+  const suggestedPath = getSuggestedTasksPath();
+  const timestamp = new Date().toISOString();
+  
+  let content = "";
+  if (existsSync(suggestedPath)) {
+    content = readFileSync(suggestedPath, "utf-8");
+  } else {
+    content = "# Suggested Tasks\n\nTasks suggested by the Ralph loop agent for review.\n\n";
+  }
+  
+  content += `\n## From Iteration ${iteration} (${timestamp})\n\n`;
+  for (const { task, milestone } of suggestions) {
+    if (milestone) {
+      content += `- [ ] ${task}\n  - suggested-milestone: ${milestone}\n`;
+    } else {
+      content += `- [ ] ${task}\n`;
+    }
+  }
+  
+  writeFileSync(suggestedPath, content);
+  console.log(`📝 ${suggestions.length} task suggestion(s) written to .ralph/suggested-tasks.md`);
+}
+
+// ============================================================================
 // Worktree management
 // ============================================================================
 
@@ -1591,6 +1646,18 @@ ${state.prompt}
 - ONLY output <promise>${state.completionPromise}</promise> when ALL tasks for milestone ${state.milestoneFilter || "ALL"} are complete
 - Do NOT lie or output false promises to exit the loop
 - If stuck, try a different approach
+
+## Suggesting New Tasks
+
+If you discover work that should be done but isn't in the task list, suggest it:
+
+\`\`\`
+<suggest-task>Description of the task that should be added</suggest-task>
+<suggest-task milestone="M2b">Task for a specific milestone</suggest-task>
+\`\`\`
+
+Suggestions are saved to .ralph/suggested-tasks.md for human review.
+Do NOT add tasks directly to the main task file - only suggest them.
 
 ## Current Iteration: ${state.iteration}${state.maxIterations > 0 ? ` / ${state.maxIterations}` : " (unlimited)"}
 
@@ -2337,6 +2404,12 @@ async function runRalphLoop(): Promise<void> {
       const combinedOutput = `${result}\n${stderr}`;
       const completionDetected = checkCompletion(combinedOutput, completionPromise);
       const taskCompletionDetected = tasksMode ? checkCompletion(combinedOutput, taskPromise) : false;
+
+      // Parse and save any suggested tasks
+      const suggestedTasks = parseSuggestedTasks(combinedOutput);
+      if (suggestedTasks.length > 0) {
+        appendSuggestedTasks(suggestedTasks, state.iteration);
+      }
 
       const iterationDuration = Date.now() - iterationStart;
 
