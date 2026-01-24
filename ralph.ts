@@ -2448,7 +2448,10 @@ async function runRalphLoop(): Promise<void> {
       history.totalDurationMs += iterationDuration;
 
       // Update struggle indicators
-      if (filesModified.length === 0) {
+      // Consider progress made if: files modified, task completed, or agent made commits
+      const taskCompleted = taskCompletionDetected || completionDetected;
+      const madeProgress = filesModified.length > 0 || taskCompleted;
+      if (!madeProgress) {
         history.struggleIndicators.noProgressIterations++;
       } else {
         history.struggleIndicators.noProgressIterations = 0; // Reset on progress
