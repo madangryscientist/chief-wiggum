@@ -2516,6 +2516,20 @@ async function runRalphLoop(): Promise<void> {
         console.log(`║  Task completed in ${state.iteration} iteration(s)`);
         console.log(`║  Total time: ${formatDurationLong(history.totalDurationMs)}`);
         console.log(`╚══════════════════════════════════════════════════════════════════╝`);
+        
+        // Tag milestone completion if filtering by milestone
+        if (state.milestoneFilter) {
+          try {
+            const tagName = `${state.milestoneFilter.toLowerCase()}-complete`;
+            const tagMessage = `Milestone ${state.milestoneFilter} completed in ${state.iteration} iterations`;
+            await $`git tag -a ${tagName} -m ${tagMessage}`.quiet();
+            console.log(`🏷️  Tagged: ${tagName}`);
+          } catch (e) {
+            // Tag might already exist
+            console.log(`⚠️  Could not create tag (may already exist)`);
+          }
+        }
+        
         clearState();
         clearHistory();
         clearContext();
