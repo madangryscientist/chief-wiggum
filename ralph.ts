@@ -1876,8 +1876,20 @@ async function runRalphLoop(): Promise<void> {
   }
   console.log(`Completion promise: ${completionPromise}`);
   if (tasksMode) {
-    console.log(`Tasks mode: ENABLED`);
+    console.log(`Tasks mode: ENABLED (markdown)`);
     console.log(`Task promise: ${taskPromise}`);
+  }
+  if (structuredTasksFile) {
+    console.log(`Structured tasks: ${structuredTasksFile}`);
+    if (milestoneFilter) {
+      console.log(`Milestone filter: ${milestoneFilter}`);
+    }
+    const summary = getStructuredTasksSummary(milestoneFilter);
+    console.log(`Task summary: ${summary.completed}/${summary.total} complete, ${summary.inProgress} in progress, ${summary.pending} pending`);
+    const nextTask = getNextStructuredTask(milestoneFilter);
+    if (nextTask) {
+      console.log(`Next task: ${nextTask.id} - ${nextTask.title}`);
+    }
   }
   console.log(`Min iterations: ${minIterations}`);
   console.log(`Max iterations: ${maxIterations > 0 ? maxIterations : "unlimited"}`);
@@ -1887,6 +1899,7 @@ async function runRalphLoop(): Promise<void> {
     console.log("OpenCode plugins: non-auth plugins disabled");
   }
   if (allowAllPermissions) console.log("Permissions: auto-approve all tools");
+  if (logFilePath) console.log(`Log file: ${logFilePath}`);
   console.log("");
   console.log("Starting loop... (Ctrl+C to stop)");
   console.log("═".repeat(68));
@@ -1934,6 +1947,16 @@ async function runRalphLoop(): Promise<void> {
     const iterInfo = maxIterations > 0 ? ` / ${maxIterations}` : "";
     const minInfo = minIterations > 1 && state.iteration < minIterations ? ` (min: ${minIterations})` : "";
     console.log(`\n🔄 Iteration ${state.iteration}${iterInfo}${minInfo}`);
+    
+    // Show structured task info if enabled
+    if (state.structuredTasksFile) {
+      const summary = getStructuredTasksSummary(state.milestoneFilter);
+      const nextTask = getNextStructuredTask(state.milestoneFilter);
+      console.log(`   Tasks: ${summary.completed}/${summary.total} complete | Next: ${nextTask?.id || "NONE"}`);
+      if (nextTask) {
+        console.log(`   "${nextTask.title}"`);
+      }
+    }
     console.log("─".repeat(68));
 
     // Capture context at start of iteration (to only clear what was consumed)
