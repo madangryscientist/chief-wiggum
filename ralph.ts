@@ -1647,6 +1647,12 @@ ${state.prompt}
 - Do NOT lie or output false promises to exit the loop
 - If stuck, try a different approach
 
+## Performance Tips
+
+- Use grep/ripgrep directly for searches - do NOT use the Task tool for simple find/search operations
+- Prefer Bash commands over spawning sub-agents
+- Keep iterations fast - avoid unnecessary tool calls
+
 ## Suggesting New Tasks
 
 If you discover work that should be done but isn't in the task list, suggest it:
