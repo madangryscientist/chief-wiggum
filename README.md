@@ -25,22 +25,42 @@ Based on the [Ralph Wiggum technique](https://ghuntley.com/ralph/) by Geoffrey H
 
 ## Installation
 
-Requires [Bun](https://bun.sh) and [OpenCode](https://opencode.ai) (or Claude Code/Codex).
+### Prerequisites
+
+- [Bun](https://bun.sh) - JavaScript runtime
+- At least one AI agent CLI:
+  - [OpenCode](https://opencode.ai) (default)
+  - [Claude Code](https://docs.anthropic.com/en/docs/claude-code)
+  - [Codex](https://github.com/openai/codex)
+
+### Setup
 
 ```bash
+# Clone the repo
 git clone https://github.com/madangryscientist/chief-wiggum
 cd chief-wiggum
+
+# Install dependencies
 bun install
-```
 
-Run directly:
-```bash
+# Option 1: Run directly with bun
 bun chief-wiggum.ts [command] [options]
+
+# Option 2: Add an alias to your shell config (~/.zshrc or ~/.bashrc)
+echo 'alias chief-wiggum="bun ~/dev/chief-wiggum/chief-wiggum.ts"' >> ~/.zshrc
+source ~/.zshrc
+
+# Option 3: Create a symlink in your PATH
+ln -s ~/dev/chief-wiggum/chief-wiggum.ts /usr/local/bin/chief-wiggum
 ```
 
-Or create an alias:
+### Verify installation
+
 ```bash
-alias chief-wiggum="bun ~/path/to/chief-wiggum/chief-wiggum.ts"
+chief-wiggum --version
+# chief-wiggum 2.0.0
+
+chief-wiggum --help
 ```
 
 ## Quick Start
