@@ -85,7 +85,7 @@ interface AgentConfig {
   type: AgentType;
   command: string;
   buildArgs: (prompt: string, model: string, options?: { allowAllPermissions?: boolean }) => string[];
-  buildEnv: (options: { filterPlugins?: boolean; allowAllPermissions?: boolean }) => Record<string, string>;
+  buildEnv: (options: { filterPlugins?: boolean; allowAllPermissions?: boolean }) => NodeJS.ProcessEnv;
   parseToolOutput: (line: string) => string | null;
   configName: string;
 }
@@ -1256,8 +1256,8 @@ async function streamProcessOutput(
 
   try {
     await Promise.all([
-      streamText(proc.stdout, chunk => { stdoutText += chunk; }, false, () => forceExit),
-      streamText(proc.stderr, chunk => { stderrText += chunk; }, true, () => forceExit),
+      streamText(proc.stdout as ReadableStream<Uint8Array> | null, chunk => { stdoutText += chunk; }, false, () => forceExit),
+      streamText(proc.stderr as ReadableStream<Uint8Array> | null, chunk => { stderrText += chunk; }, true, () => forceExit),
     ]);
   } finally {
     clearInterval(heartbeatTimer);
@@ -1825,8 +1825,8 @@ async function cmdRun(args: string[], flags: Record<string, string | boolean>): 
         toolCounts = streamed.toolCounts;
         timedOut = streamed.timedOut;
       } else {
-        const stdoutPromise = new Response(currentProc.stdout).text();
-        const stderrPromise = new Response(currentProc.stderr).text();
+        const stdoutPromise = new Response(currentProc.stdout as ReadableStream<Uint8Array>).text();
+        const stderrPromise = new Response(currentProc.stderr as ReadableStream<Uint8Array>).text();
         [result, stderr] = await Promise.all([stdoutPromise, stderrPromise]);
       }
 
