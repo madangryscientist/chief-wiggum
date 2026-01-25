@@ -420,6 +420,24 @@ function escapeRegex(str: string): string {
   return str.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
 
+async function killProcessTree(pid: number): Promise<void> {
+  if (process.platform === "darwin" || process.platform === "linux") {
+    // Use pkill to kill all processes in the process group
+    try {
+      await $`pkill -9 -P ${pid}`.quiet();
+    } catch {}
+    // Also try to kill the process directly
+    try {
+      process.kill(pid, "SIGKILL");
+    } catch {}
+  } else {
+    // Windows or other - just try SIGKILL
+    try {
+      process.kill(pid, "SIGKILL");
+    } catch {}
+  }
+}
+
 // ============================================================================
 // State management
 // ============================================================================
@@ -1153,15 +1171,37 @@ async function streamProcessOutput(
     stream: ReadableStream<Uint8Array> | null,
     onText: (chunk: string) => void,
     isError: boolean,
+    shouldExit: () => boolean,
   ) => {
     if (!stream) return;
     const reader = stream.getReader();
     const decoder = new TextDecoder();
     let buffer = "";
+    
+    const readWithTimeout = async (): Promise<{ value?: Uint8Array; done: boolean } | null> => {
+      // Check exit flag every 100ms while waiting for read
+      const readPromise = reader.read();
+      while (true) {
+        const result = await Promise.race([
+          readPromise,
+          new Promise<null>(resolve => setTimeout(() => resolve(null), 100)),
+        ]);
+        if (result !== null) return result;
+        if (shouldExit()) {
+          try { reader.cancel(); } catch {}
+          return { done: true };
+        }
+      }
+    };
+    
     while (true) {
-      const { value, done } = await reader.read();
-      if (done) break;
-      const text = decoder.decode(value, { stream: true });
+      if (shouldExit()) {
+        try { reader.cancel(); } catch {}
+        break;
+      }
+      const result = await readWithTimeout();
+      if (!result || result.done) break;
+      const text = decoder.decode(result.value, { stream: true });
       if (text.length > 0) {
         onText(text);
         buffer += text;
@@ -1178,14 +1218,30 @@ async function streamProcessOutput(
     if (buffer.length > 0) handleLine(buffer, isError);
   };
 
-  const heartbeatTimer = setInterval(() => {
+  let killAttempts = 0;
+  let forceExit = false;
+  
+  const heartbeatTimer = setInterval(async () => {
     const now = Date.now();
     const inactivityDuration = now - lastActivityAt;
     
     if (options.inactivityTimeoutMs > 0 && inactivityDuration >= options.inactivityTimeoutMs) {
       timedOut = true;
-      console.log(`\n⏰ INACTIVITY TIMEOUT: No output for ${formatDuration(inactivityDuration)}. Killing process...`);
-      try { proc.kill(); } catch {}
+      killAttempts++;
+      
+      if (killAttempts === 1) {
+        console.log(`\n⏰ INACTIVITY TIMEOUT: No output for ${formatDuration(inactivityDuration)}. Sending SIGTERM...`);
+        try { proc.kill("SIGTERM"); } catch {}
+      } else if (killAttempts === 2) {
+        console.log(`⏰ Process didn't respond to SIGTERM. Sending SIGKILL...`);
+        try { proc.kill("SIGKILL"); } catch {}
+      } else if (killAttempts === 3) {
+        console.log(`⏰ Killing process tree (PID: ${proc.pid})...`);
+        await killProcessTree(proc.pid);
+      } else if (killAttempts >= 4) {
+        // Force exit - the streams are stuck
+        forceExit = true;
+      }
       return;
     }
     
@@ -1200,11 +1256,17 @@ async function streamProcessOutput(
 
   try {
     await Promise.all([
-      streamText(proc.stdout, chunk => { stdoutText += chunk; }, false),
-      streamText(proc.stderr, chunk => { stderrText += chunk; }, true),
+      streamText(proc.stdout, chunk => { stdoutText += chunk; }, false, () => forceExit),
+      streamText(proc.stderr, chunk => { stderrText += chunk; }, true, () => forceExit),
     ]);
   } finally {
     clearInterval(heartbeatTimer);
+  }
+  
+  // If we force-exited, make one more attempt to clean up
+  if (forceExit) {
+    console.log(`⏰ Force-exiting stream readers after timeout`);
+    await killProcessTree(proc.pid);
   }
 
   if (options.compactTools) maybePrintToolSummary(true);
@@ -1663,18 +1725,42 @@ async function cmdRun(args: string[], flags: Record<string, string | boolean>): 
 
   // Track subprocess for cleanup
   let currentProc: ReturnType<typeof Bun.spawn> | null = null;
+  let caffeinateProc: ReturnType<typeof Bun.spawn> | null = null;
   let stopping = false;
+
+  // Prevent Mac from sleeping while the loop runs
+  if (process.platform === "darwin") {
+    try {
+      caffeinateProc = Bun.spawn(["caffeinate", "-i"], {
+        stdin: "ignore",
+        stdout: "ignore",
+        stderr: "ignore",
+      });
+      console.log("☕ Sleep prevention enabled (caffeinate)");
+    } catch {
+      console.log("⚠️  Could not start caffeinate - Mac may sleep during long iterations");
+    }
+  }
+
+  const stopCaffeinate = () => {
+    if (caffeinateProc) {
+      try { caffeinateProc.kill(); } catch {}
+      caffeinateProc = null;
+    }
+  };
 
   process.on("SIGINT", () => {
     if (stopping) {
       console.log("\nForce stopping...");
+      stopCaffeinate();
       process.exit(1);
     }
     stopping = true;
     console.log("\nStopping Ralph loop...");
     if (currentProc) {
-      try { currentProc.kill(); } catch {}
+      try { currentProc.kill("SIGKILL"); } catch {}
     }
+    stopCaffeinate();
     clearState();
     console.log("Loop cancelled.");
     process.exit(0);
@@ -1687,6 +1773,7 @@ async function cmdRun(args: string[], flags: Record<string, string | boolean>): 
       console.log(`║  Max iterations (${opts.iterations}) reached`);
       console.log(`║  Total time: ${formatDurationLong(history.totalDurationMs)}`);
       console.log(`╚══════════════════════════════════════════════════════════════════╝`);
+      stopCaffeinate();
       clearState();
       break;
     }
@@ -1820,6 +1907,7 @@ async function cmdRun(args: string[], flags: Record<string, string | boolean>): 
           } catch {}
         }
         
+        stopCaffeinate();
         clearState();
         clearHistory();
         clearContext();
@@ -1849,7 +1937,7 @@ async function cmdRun(args: string[], flags: Record<string, string | boolean>): 
 
     } catch (error) {
       if (currentProc) {
-        try { currentProc.kill(); } catch {}
+        try { currentProc.kill("SIGKILL"); } catch {}
         currentProc = null;
       }
       console.error(`\n❌ Error in iteration ${state.iteration}:`, error);
