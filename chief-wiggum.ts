@@ -206,64 +206,62 @@ interface ParsedArgs {
   flags: Record<string, string | boolean>;
 }
 
+type FlagDef = { key: string; hasValue: boolean; default?: string };
+
+const FLAG_DEFS: Record<string, FlagDef> = {
+  "-h": { key: "help", hasValue: false },
+  "--help": { key: "help", hasValue: false },
+  "-V": { key: "version", hasValue: false },
+  "--version": { key: "version", hasValue: false },
+  "-f": { key: "prompt", hasValue: true },
+  "--prompt": { key: "prompt", hasValue: true },
+  "-n": { key: "iterations", hasValue: true, default: "0" },
+  "--iterations": { key: "iterations", hasValue: true, default: "0" },
+  "-m": { key: "model", hasValue: true },
+  "--model": { key: "model", hasValue: true },
+  "-a": { key: "agent", hasValue: true },
+  "--agent": { key: "agent", hasValue: true },
+  "-t": { key: "tasksFile", hasValue: true },
+  "--tasks-file": { key: "tasksFile", hasValue: true },
+  "-M": { key: "milestone", hasValue: true },
+  "--milestone": { key: "milestone", hasValue: true },
+  "-w": { key: "workspace", hasValue: true },
+  "--workspace": { key: "workspace", hasValue: true },
+  "--repo": { key: "repo", hasValue: true },
+  "-b": { key: "branch", hasValue: true },
+  "--branch": { key: "branch", hasValue: true },
+  "--done": { key: "done", hasValue: true },
+  "--next": { key: "next", hasValue: true },
+  "--timeout": { key: "timeout", hasValue: true, default: "30" },
+  "--force": { key: "force", hasValue: false },
+  "-v": { key: "verbose", hasValue: false },
+  "--verbose": { key: "verbose", hasValue: false },
+  "-q": { key: "quiet", hasValue: false },
+  "--quiet": { key: "quiet", hasValue: false },
+  "--no-commit": { key: "noCommit", hasValue: false },
+  "-i": { key: "interactive", hasValue: false },
+  "--interactive": { key: "interactive", hasValue: false },
+  "--no-plugins": { key: "noPlugins", hasValue: false },
+  "--log": { key: "log", hasValue: false },
+  "--clear": { key: "clear", hasValue: false },
+};
+
+const COMMANDS = ["run", "status", "context", "tasks"];
+
 function parseArgs(argv: string[]): ParsedArgs {
   const result: ParsedArgs = { command: "", args: [], flags: {} };
-  
-  // Check for subcommand
-  const commands = ["run", "status", "context", "tasks"];
-  if (argv.length > 0 && commands.includes(argv[0])) {
+
+  if (argv.length > 0 && COMMANDS.includes(argv[0])) {
     result.command = argv[0];
     argv = argv.slice(1);
   }
-  
-  let i = 0;
-  while (i < argv.length) {
+
+  for (let i = 0; i < argv.length; i++) {
     const arg = argv[i];
-    
-    if (arg === "-h" || arg === "--help") {
-      result.flags.help = true;
-    } else if (arg === "-V" || arg === "--version") {
-      result.flags.version = true;
-    } else if (arg === "-f" || arg === "--prompt") {
-      result.flags.prompt = argv[++i] || "";
-    } else if (arg === "-n" || arg === "--iterations") {
-      result.flags.iterations = argv[++i] || "0";
-    } else if (arg === "-m" || arg === "--model") {
-      result.flags.model = argv[++i] || "";
-    } else if (arg === "-a" || arg === "--agent") {
-      result.flags.agent = argv[++i] || "";
-    } else if (arg === "-t" || arg === "--tasks-file") {
-      result.flags.tasksFile = argv[++i] || "";
-    } else if (arg === "-M" || arg === "--milestone") {
-      result.flags.milestone = argv[++i] || "";
-    } else if (arg === "-w" || arg === "--workspace") {
-      result.flags.workspace = argv[++i] || "";
-    } else if (arg === "--repo") {
-      result.flags.repo = argv[++i] || "";
-    } else if (arg === "-b" || arg === "--branch") {
-      result.flags.branch = argv[++i] || "";
-    } else if (arg === "--done") {
-      result.flags.done = argv[++i] || "";
-    } else if (arg === "--next") {
-      result.flags.next = argv[++i] || "";
-    } else if (arg === "--timeout") {
-      result.flags.timeout = argv[++i] || "30";
-    } else if (arg === "--force") {
-      result.flags.force = true;
-    } else if (arg === "-v" || arg === "--verbose") {
-      result.flags.verbose = true;
-    } else if (arg === "-q" || arg === "--quiet") {
-      result.flags.quiet = true;
-    } else if (arg === "--no-commit") {
-      result.flags.noCommit = true;
-    } else if (arg === "-i" || arg === "--interactive") {
-      result.flags.interactive = true;
-    } else if (arg === "--no-plugins") {
-      result.flags.noPlugins = true;
-    } else if (arg === "--log") {
-      result.flags.log = true;
-    } else if (arg === "--clear") {
-      result.flags.clear = true;
+    const def = FLAG_DEFS[arg];
+
+    if (def) {
+      result.flags[def.key] = def.hasValue ? (argv[++i] ?? def.default ?? "") : true;
     } else if (arg.startsWith("-")) {
       console.error(`Unknown option: ${arg}`);
       console.error(`Run 'chief-wiggum --help' for usage`);
@@ -271,9 +269,8 @@ function parseArgs(argv: string[]): ParsedArgs {
     } else {
       result.args.push(arg);
     }
-    i++;
   }
-  
+
   return result;
 }
 
