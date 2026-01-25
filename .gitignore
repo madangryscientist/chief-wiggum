@@ -81,3 +81,4 @@ node_modules/
 bin/*
 !bin/ralph.js
 dist/
+bin/
