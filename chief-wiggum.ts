@@ -85,11 +85,89 @@ interface RalphState {
 }
 
 // ============================================================================
+// WebSocket Event Types
+// ============================================================================
+
+type ServerEvent =
+	| {
+			type: "loop.started";
+			loopId: string;
+			prompt: string;
+			task?: StructuredTask;
+	  }
+	| { type: "iteration.started"; iteration: number; loopId: string }
+	| { type: "iteration.completed"; iteration: number; result: IterationHistory }
+	| {
+			type: "task.updated";
+			task: StructuredTask;
+			taskId: string;
+			status: string;
+	  }
+	| { type: "context.received"; text: string }
+	| { type: "loop.completed"; history: RalphHistory; loopId: string }
+	| { type: "loop.stopped"; reason: string; loopId: string; iteration: number }
+	| { type: "error"; message: string };
+
+// ============================================================================
 // Globals
 // ============================================================================
 
 let workspaceRoot = process.cwd();
 let structuredTasksFile: string | null = null;
+
+// ============================================================================
+// WebSocket Manager
+// ============================================================================
+
+import type { ServerWebSocket } from "bun";
+
+type WSData = { id: string };
+
+class WebSocketManager {
+	private clients: Map<string, ServerWebSocket<WSData>> = new Map();
+	private clientIdCounter = 0;
+
+	generateClientId(): string {
+		return `ws-${Date.now()}-${++this.clientIdCounter}`;
+	}
+
+	addClient(ws: ServerWebSocket<WSData>): void {
+		this.clients.set(ws.data.id, ws);
+		console.log(
+			`[WS] Client connected: ${ws.data.id} (${this.clients.size} total)`,
+		);
+	}
+
+	removeClient(ws: ServerWebSocket<WSData>): void {
+		this.clients.delete(ws.data.id);
+		console.log(
+			`[WS] Client disconnected: ${ws.data.id} (${this.clients.size} total)`,
+		);
+	}
+
+	broadcast(event: ServerEvent): void {
+		const message = JSON.stringify(event);
+		const timestamp = new Date().toISOString();
+		console.log(
+			`[WS] Broadcasting ${event.type} to ${this.clients.size} client(s)`,
+		);
+
+		for (const [id, client] of this.clients) {
+			try {
+				client.send(message);
+			} catch (err) {
+				console.error(`[WS] Failed to send to ${id}:`, err);
+				this.clients.delete(id);
+			}
+		}
+	}
+
+	getClientCount(): number {
+		return this.clients.size;
+	}
+}
+
+const wsManager = new WebSocketManager();
 
 // ============================================================================
 // Path helpers
@@ -1585,12 +1663,26 @@ function cmdServe(flags: Record<string, string | boolean>): void {
 
 	const port = parseInt((flags.port as string) || "3456", 10);
 
-	const server = Bun.serve({
+	const server = Bun.serve<WSData>({
 		port,
-		fetch(req) {
+		fetch(req, server) {
 			const url = new URL(req.url);
 			const path = url.pathname;
 			const method = req.method;
+
+			// Handle WebSocket upgrade for /events endpoint
+			if (path === "/events") {
+				const clientId = wsManager.generateClientId();
+				const upgraded = server.upgrade(req, {
+					data: { id: clientId },
+				});
+				if (upgraded) {
+					logRequest("WS", path, 101);
+					return undefined;
+				}
+				logRequest("WS", path, 400);
+				return new Response("WebSocket upgrade failed", { status: 400 });
+			}
 
 			if (method === "OPTIONS") {
 				logRequest(method, path, 204);
@@ -1758,6 +1850,14 @@ function cmdServe(flags: Record<string, string | boolean>): void {
 								task = getNextStructuredTask(milestone || null);
 							}
 
+							// Broadcast loop.started event
+							wsManager.broadcast({
+								type: "loop.started",
+								loopId,
+								prompt: iterationPrompt,
+								task: task || undefined,
+							});
+
 							const resp = jsonResponse({
 								success: true,
 								loopId,
@@ -1816,6 +1916,13 @@ function cmdServe(flags: Record<string, string | boolean>): void {
 							history.totalDurationMs += iterationRecord.durationMs;
 							saveHistory(history);
 
+							// Broadcast iteration.completed event
+							wsManager.broadcast({
+								type: "iteration.completed",
+								iteration: state.iteration,
+								result: iterationRecord,
+							});
+
 							// Determine next action
 							let next: "continue" | "complete" | "stop" = "continue";
 							let task: StructuredTask | null = null;
@@ -1825,6 +1932,13 @@ function cmdServe(flags: Record<string, string | boolean>): void {
 							const currentState = loadState();
 							if (!currentState?.active) {
 								next = "stop";
+								// Broadcast loop.stopped event
+								wsManager.broadcast({
+									type: "loop.stopped",
+									reason: "Loop was stopped",
+									loopId: state.loopId || "",
+									iteration: state.iteration,
+								});
 							} else if (completionDetected) {
 								// Check if all tasks are complete
 								if (state.structuredTasksFile) {
@@ -1835,6 +1949,12 @@ function cmdServe(flags: Record<string, string | boolean>): void {
 										next = "complete";
 										state.active = false;
 										saveState(state);
+										// Broadcast loop.completed event
+										wsManager.broadcast({
+											type: "loop.completed",
+											history: loadHistory(),
+											loopId: state.loopId || "",
+										});
 									} else {
 										// Get next task
 										task = getNextStructuredTask(state.milestoneFilter || null);
@@ -1842,12 +1962,24 @@ function cmdServe(flags: Record<string, string | boolean>): void {
 											next = "complete";
 											state.active = false;
 											saveState(state);
+											// Broadcast loop.completed event
+											wsManager.broadcast({
+												type: "loop.completed",
+												history: loadHistory(),
+												loopId: state.loopId || "",
+											});
 										}
 									}
 								} else {
 									next = "complete";
 									state.active = false;
 									saveState(state);
+									// Broadcast loop.completed event
+									wsManager.broadcast({
+										type: "loop.completed",
+										history: loadHistory(),
+										loopId: state.loopId || "",
+									});
 								}
 							} else {
 								// Continue with next iteration
@@ -1862,6 +1994,12 @@ function cmdServe(flags: Record<string, string | boolean>): void {
 								state.startedAt = new Date().toISOString();
 								saveState(state);
 								prompt = buildPrompt(state);
+								// Broadcast iteration.started event
+								wsManager.broadcast({
+									type: "iteration.started",
+									iteration: state.iteration,
+									loopId: state.loopId || "",
+								});
 							}
 
 							const resp = jsonResponse({
@@ -1928,6 +2066,20 @@ function cmdServe(flags: Record<string, string | boolean>): void {
 								);
 								logRequest(method, path, 400);
 								return resp;
+							}
+
+							// Get the updated task for broadcasting
+							const data = loadStructuredTasks();
+							const updatedTask = data?.allTasks.get(taskId);
+
+							// Broadcast task.updated event
+							if (updatedTask) {
+								wsManager.broadcast({
+									type: "task.updated",
+									task: updatedTask,
+									taskId,
+									status,
+								});
 							}
 
 							const resp = jsonResponse({
@@ -2034,6 +2186,12 @@ function cmdServe(flags: Record<string, string | boolean>): void {
 								writeFileSync(contextPath, `# Ralph Loop Context\n${newEntry}`);
 							}
 
+							// Broadcast context.received event
+							wsManager.broadcast({
+								type: "context.received",
+								text,
+							});
+
 							const resp = jsonResponse({ success: true, action: "added" });
 							logRequest(method, path, 200);
 							return resp;
@@ -2056,6 +2214,15 @@ function cmdServe(flags: Record<string, string | boolean>): void {
 					} else {
 						state.active = false;
 						saveState(state);
+
+						// Broadcast loop.stopped event
+						wsManager.broadcast({
+							type: "loop.stopped",
+							reason: "Stopped by user request",
+							loopId: state.loopId || "",
+							iteration: state.iteration,
+						});
+
 						response = jsonResponse({
 							success: true,
 							stoppedAt: new Date().toISOString(),
@@ -2073,6 +2240,21 @@ function cmdServe(flags: Record<string, string | boolean>): void {
 
 			logRequest(method, path, response.status);
 			return response;
+		},
+		websocket: {
+			open(ws) {
+				wsManager.addClient(ws);
+			},
+			message(ws, message) {
+				// We don't expect messages from clients, but log them if received
+				console.log(`[WS] Received message from ${ws.data.id}: ${message}`);
+			},
+			close(ws, code, reason) {
+				wsManager.removeClient(ws);
+			},
+			drain(ws) {
+				// Handle backpressure if needed
+			},
 		},
 	});
 
@@ -2092,6 +2274,7 @@ function cmdServe(flags: Record<string, string | boolean>): void {
 	console.log(`   POST /task/mark         - Mark task status`);
 	console.log(`   POST /context           - Add context`);
 	console.log(`   POST /stop              - Stop active loop`);
+	console.log(`   WS   /events            - Real-time event stream`);
 	console.log(`\n   Press Ctrl+C to stop\n`);
 }
 
@@ -2121,11 +2304,24 @@ Endpoints:
   POST /task/mark         - Mark task status (body: {taskId, status})
   POST /context           - Add context (body: {"text": "..."})
   POST /stop              - Stop active loop
+  WS   /events            - Real-time event stream (WebSocket)
+
+WebSocket Events:
+  loop.started            - Loop initialized
+  iteration.started       - New iteration beginning
+  iteration.completed     - Iteration finished
+  task.updated           - Task status changed
+  context.received       - New context added
+  loop.completed         - All tasks complete
+  loop.stopped           - Loop stopped
 
 Examples:
   chief-wiggum serve
   chief-wiggum serve --port 8080
   chief-wiggum serve -w ~/projects/my-app -t docs/tasks.md
+  
+  # Connect to WebSocket (using wscat)
+  wscat -c ws://localhost:3456/events
 `;
 
 // ============================================================================

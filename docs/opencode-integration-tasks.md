@@ -115,18 +115,43 @@ Add endpoints for the subagent to manage loop lifecycle.
 
 Add WebSocket support for real-time event streaming.
 
-- [ ] `m4-01` Add WebSocket upgrade handling in Bun.serve()
-- [ ] `m4-02` Create `WebSocketManager` class to track connected clients
-- [ ] `m4-03` Implement `/events` WebSocket endpoint
-- [ ] `m4-04` Define event types: loop.started, iteration.started, iteration.completed, task.updated, context.received, loop.completed, loop.stopped, error
-- [ ] `m4-05` Broadcast `loop.started` event when POST `/start` is called
-- [ ] `m4-06` Broadcast `iteration.completed` event when POST `/iteration/complete` is called
-- [ ] `m4-07` Broadcast `task.updated` event when POST `/task/mark` is called
-- [ ] `m4-08` Broadcast `context.received` event when POST `/context` is called
-- [ ] `m4-09` Broadcast `loop.completed` or `loop.stopped` events appropriately
-- [ ] `m4-10` Handle WebSocket client disconnect gracefully
-- [ ] `m4-11` Test WebSocket with wscat or similar tool
-- [ ] `m4-12` Run `bun test` and `npx biome check --write`
+- [x] `m4-01` Add WebSocket upgrade handling in Bun.serve()
+  - started: 2026-01-26T18:00:00.000Z
+  - completed: 2026-01-26T18:30:00.000Z
+- [x] `m4-02` Create `WebSocketManager` class to track connected clients
+  - started: 2026-01-26T18:00:00.000Z
+  - completed: 2026-01-26T18:30:00.000Z
+- [x] `m4-03` Implement `/events` WebSocket endpoint
+  - started: 2026-01-26T18:00:00.000Z
+  - completed: 2026-01-26T18:30:00.000Z
+- [x] `m4-04` Define event types: loop.started, iteration.started, iteration.completed, task.updated, context.received, loop.completed, loop.stopped, error
+  - started: 2026-01-26T18:00:00.000Z
+  - completed: 2026-01-26T18:30:00.000Z
+- [x] `m4-05` Broadcast `loop.started` event when POST `/start` is called
+  - started: 2026-01-26T18:00:00.000Z
+  - completed: 2026-01-26T18:30:00.000Z
+- [x] `m4-06` Broadcast `iteration.completed` event when POST `/iteration/complete` is called
+  - started: 2026-01-26T18:00:00.000Z
+  - completed: 2026-01-26T18:30:00.000Z
+- [x] `m4-07` Broadcast `task.updated` event when POST `/task/mark` is called
+  - started: 2026-01-26T18:00:00.000Z
+  - completed: 2026-01-26T18:30:00.000Z
+- [x] `m4-08` Broadcast `context.received` event when POST `/context` is called
+  - started: 2026-01-26T18:00:00.000Z
+  - completed: 2026-01-26T18:30:00.000Z
+- [x] `m4-09` Broadcast `loop.completed` or `loop.stopped` events appropriately
+  - started: 2026-01-26T18:00:00.000Z
+  - completed: 2026-01-26T18:30:00.000Z
+- [x] `m4-10` Handle WebSocket client disconnect gracefully
+  - started: 2026-01-26T18:00:00.000Z
+  - completed: 2026-01-26T18:30:00.000Z
+- [x] `m4-11` Test WebSocket with wscat or similar tool
+  - started: 2026-01-26T18:30:00.000Z
+  - completed: 2026-01-26T18:35:00.000Z
+  - note: Tested with custom test-websocket.ts script
+- [x] `m4-12` Run `bun test` and `npx biome check --write`
+  - started: 2026-01-26T18:35:00.000Z
+  - completed: 2026-01-26T18:35:00.000Z
 
 ## Milestone 5: OpenCode Plugin
 
