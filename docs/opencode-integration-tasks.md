@@ -197,15 +197,23 @@ Create the chief-wiggum subagent definition.
 
 Verify everything works together and clean up.
 
-- [ ] `m7-01` Create test prompt file `docs/test-prompt.md` for E2E testing
-- [ ] `m7-02` Create test tasks file `docs/test-tasks.md` for E2E testing
+- [x] `m7-01` Create test prompt file `docs/test-prompt.md` for E2E testing
+  - completed: 2026-01-26T21:00:00.000Z
+- [x] `m7-02` Create test tasks file `docs/test-tasks.md` for E2E testing
+  - completed: 2026-01-26T21:00:00.000Z
 - [ ] `m7-03` E2E test: Start server, invoke subagent, verify loop completes
 - [ ] `m7-04` E2E test: Connect WebSocket client, verify events stream during loop
 - [ ] `m7-05` E2E test: Inject context mid-loop, verify subagent receives it
 - [ ] `m7-06` E2E test: Stop loop mid-execution, verify graceful shutdown
-- [ ] `m7-07` Add server health check endpoint GET `/health`
-- [ ] `m7-08` Add graceful server shutdown on SIGINT/SIGTERM
-- [ ] `m7-09` Update README.md with new architecture and usage
-- [ ] `m7-10` Remove any dead code or unused functions
-- [ ] `m7-11` Final `bun test` and `npx biome check --write`
+- [x] `m7-07` Add server health check endpoint GET `/health`
+  - completed: 2026-01-26T21:00:00.000Z
+- [x] `m7-08` Add graceful server shutdown on SIGINT/SIGTERM
+  - completed: 2026-01-26T21:00:00.000Z
+- [x] `m7-09` Update README.md with new architecture and usage
+  - completed: 2026-01-26T21:00:00.000Z
+- [x] `m7-10` Remove any dead code or unused functions
+  - completed: 2026-01-26T21:00:00.000Z
+  - note: No dead code found after reviewing all functions
+- [x] `m7-11` Final `bun test` and `npx biome check --write`
+  - completed: 2026-01-26T21:00:00.000Z
 - [ ] `m7-12` Manual smoke test of complete workflow
