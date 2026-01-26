@@ -701,31 +701,44 @@ function updateStructuredTaskStatus(
 			);
 			i++;
 
-			// Check for existing metadata lines
-			const hasStarted = i < lines.length && lines[i].match(/^\s+-\s+started:/);
-			const hasCompleted =
-				i < lines.length &&
-				lines[i + (hasStarted ? 1 : 0)]?.match(/^\s+-\s+completed:/);
+			// Scan ahead to find existing metadata lines and detect started/completed
+			let hasStarted = false;
+			let hasCompleted = false;
+			const metadataStartIndex = i;
+			let metadataEndIndex = i;
 
-			// Add or update metadata
+			while (
+				metadataEndIndex < lines.length &&
+				lines[metadataEndIndex].match(/^\s+-\s+\w+:/)
+			) {
+				const metaLine = lines[metadataEndIndex];
+				if (metaLine.match(/^\s+-\s+started:/)) {
+					hasStarted = true;
+				}
+				if (metaLine.match(/^\s+-\s+completed:/)) {
+					hasCompleted = true;
+				}
+				metadataEndIndex++;
+			}
+
+			// Add started timestamp if marking in-progress and not already present
 			if (newStatus === "in-progress" && !hasStarted) {
 				newLines.push(`  - started: ${new Date().toISOString()}`);
 			}
 
-			// Copy existing metadata lines
-			while (i < lines.length && lines[i].match(/^\s+-\s+\w+:/)) {
-				const metaLine = lines[i];
+			// Copy existing metadata lines, skipping completed if we're re-completing
+			for (let j = metadataStartIndex; j < metadataEndIndex; j++) {
+				const metaLine = lines[j];
 				if (newStatus === "complete" && metaLine.match(/^\s+-\s+completed:/)) {
-					// Skip old completed line, we'll add new one
-					i++;
+					// Skip old completed line, we'll add a new one
 					continue;
 				}
 				newLines.push(metaLine);
-				i++;
 			}
+			i = metadataEndIndex;
 
 			// Add completed timestamp if marking complete
-			if (newStatus === "complete" && !hasCompleted) {
+			if (newStatus === "complete") {
 				newLines.push(`  - completed: ${new Date().toISOString()}`);
 			}
 		} else {
@@ -1320,15 +1333,14 @@ function parseLogFile(filePath: string): LogFileSummary | null {
 		const filename = filePath.split("/").pop() || "";
 
 		// Parse filename: <milestone>-<timestamp>.log
+		// Filename format: milestone-YYYY-MM-DDTHH-MM-SS.log
 		const match = filename.match(
-			/^(.+)-(\d{4}-\d{2}-\d{2}T\d{2}-\d{2}-\d{2})\.log$/,
+			/^(.+)-(\d{4}-\d{2}-\d{2})T(\d{2})-(\d{2})-(\d{2})\.log$/,
 		);
 		const milestone = match?.[1] || "unknown";
-		const timestampStr =
-			match?.[2]?.replace(/-/g, (m, i) => (i > 9 ? ":" : "-")) || "";
-		const timestamp = new Date(
-			timestampStr.replace(/T(\d{2})-(\d{2})-(\d{2})/, "T$1:$2:$3"),
-		);
+		const timestamp = match
+			? new Date(`${match[2]}T${match[3]}:${match[4]}:${match[5]}`)
+			: new Date(0);
 
 		// Count iterations
 		const iterationMatches = content.match(/🔄 Iteration \d+/g);

@@ -267,3 +267,297 @@ describe("parseStructuredTasks", () => {
 		expect(result.allTasks.size).toBe(0);
 	});
 });
+
+// Pure function version of updateStructuredTaskStatus for testing
+function updateStructuredTaskStatusContent(
+	content: string,
+	taskId: string,
+	newStatus: "todo" | "in-progress" | "complete",
+): { success: boolean; content?: string; error?: string } {
+	const lines = content.split("\n");
+	const newLines: string[] = [];
+	let found = false;
+	let i = 0;
+
+	while (i < lines.length) {
+		const line = lines[i];
+		const taskMatch = line.match(
+			/^(-\s+\[)([ x/])(\]\s+`?)([a-zA-Z0-9_-]+)(`?\s+.+)$/,
+		);
+
+		if (taskMatch && taskMatch[4] === taskId) {
+			found = true;
+			const statusChar =
+				newStatus === "complete"
+					? "x"
+					: newStatus === "in-progress"
+						? "/"
+						: " ";
+			newLines.push(
+				`${taskMatch[1]}${statusChar}${taskMatch[3]}${taskMatch[4]}${taskMatch[5]}`,
+			);
+			i++;
+
+			// Scan ahead to find existing metadata lines and detect started/completed
+			let hasStarted = false;
+			let hasCompleted = false;
+			const metadataStartIndex = i;
+			let metadataEndIndex = i;
+
+			while (
+				metadataEndIndex < lines.length &&
+				lines[metadataEndIndex].match(/^\s+-\s+\w+:/)
+			) {
+				const metaLine = lines[metadataEndIndex];
+				if (metaLine.match(/^\s+-\s+started:/)) {
+					hasStarted = true;
+				}
+				if (metaLine.match(/^\s+-\s+completed:/)) {
+					hasCompleted = true;
+				}
+				metadataEndIndex++;
+			}
+
+			// Add started timestamp if marking in-progress and not already present
+			if (newStatus === "in-progress" && !hasStarted) {
+				newLines.push(`  - started: TIMESTAMP`);
+			}
+
+			// Copy existing metadata lines, skipping completed if we're re-completing
+			for (let j = metadataStartIndex; j < metadataEndIndex; j++) {
+				const metaLine = lines[j];
+				if (newStatus === "complete" && metaLine.match(/^\s+-\s+completed:/)) {
+					// Skip old completed line, we'll add a new one
+					continue;
+				}
+				newLines.push(metaLine);
+			}
+			i = metadataEndIndex;
+
+			// Add completed timestamp if marking complete
+			if (newStatus === "complete") {
+				newLines.push(`  - completed: TIMESTAMP`);
+			}
+		} else {
+			newLines.push(line);
+			i++;
+		}
+	}
+
+	if (!found) {
+		return { success: false, error: `Task not found: ${taskId}` };
+	}
+
+	return { success: true, content: newLines.join("\n") };
+}
+
+describe("updateStructuredTaskStatus", () => {
+	test("marks task as in-progress and adds started timestamp", () => {
+		const content = `## M1
+
+- [ ] \`task-001\` First task`;
+
+		const result = updateStructuredTaskStatusContent(
+			content,
+			"task-001",
+			"in-progress",
+		);
+
+		expect(result.success).toBe(true);
+		expect(result.content).toContain("- [/] `task-001`");
+		expect(result.content).toContain("  - started: TIMESTAMP");
+	});
+
+	test("marks task as complete and adds completed timestamp", () => {
+		const content = `## M1
+
+- [/] \`task-001\` First task
+  - started: 2024-01-01T10:00:00Z`;
+
+		const result = updateStructuredTaskStatusContent(
+			content,
+			"task-001",
+			"complete",
+		);
+
+		expect(result.success).toBe(true);
+		expect(result.content).toContain("- [x] `task-001`");
+		expect(result.content).toContain("  - started: 2024-01-01T10:00:00Z");
+		expect(result.content).toContain("  - completed: TIMESTAMP");
+	});
+
+	test("preserves existing started timestamp when marking complete", () => {
+		const content = `## M1
+
+- [/] \`task-001\` First task
+  - started: 2024-01-01T10:00:00Z`;
+
+		const result = updateStructuredTaskStatusContent(
+			content,
+			"task-001",
+			"complete",
+		);
+
+		expect(result.success).toBe(true);
+		expect(result.content).toContain("  - started: 2024-01-01T10:00:00Z");
+	});
+
+	test("does not add started timestamp if already present", () => {
+		const content = `## M1
+
+- [ ] \`task-001\` First task
+  - started: 2024-01-01T10:00:00Z`;
+
+		const result = updateStructuredTaskStatusContent(
+			content,
+			"task-001",
+			"in-progress",
+		);
+
+		expect(result.success).toBe(true);
+		// Should only have one started line
+		const startedMatches = result.content?.match(/started:/g);
+		expect(startedMatches).toHaveLength(1);
+		expect(result.content).toContain("  - started: 2024-01-01T10:00:00Z");
+	});
+
+	test("replaces completed timestamp when re-completing", () => {
+		const content = `## M1
+
+- [x] \`task-001\` First task
+  - started: 2024-01-01T10:00:00Z
+  - completed: 2024-01-01T11:00:00Z`;
+
+		const result = updateStructuredTaskStatusContent(
+			content,
+			"task-001",
+			"complete",
+		);
+
+		expect(result.success).toBe(true);
+		// Should only have one completed line (the new TIMESTAMP)
+		const completedMatches = result.content?.match(/completed:/g);
+		expect(completedMatches).toHaveLength(1);
+		expect(result.content).toContain("  - completed: TIMESTAMP");
+		expect(result.content).not.toContain("2024-01-01T11:00:00Z");
+	});
+
+	test("handles task with only completed metadata (no started)", () => {
+		const content = `## M1
+
+- [x] \`task-001\` First task
+  - completed: 2024-01-01T11:00:00Z`;
+
+		const result = updateStructuredTaskStatusContent(
+			content,
+			"task-001",
+			"complete",
+		);
+
+		expect(result.success).toBe(true);
+		expect(result.content).toContain("- [x] `task-001`");
+		expect(result.content).toContain("  - completed: TIMESTAMP");
+		expect(result.content).not.toContain("2024-01-01T11:00:00Z");
+	});
+
+	test("handles multiple metadata fields in different orders", () => {
+		const content = `## M1
+
+- [/] \`task-001\` First task
+  - depends: task-000
+  - started: 2024-01-01T10:00:00Z
+  - verify: \`bun test\``;
+
+		const result = updateStructuredTaskStatusContent(
+			content,
+			"task-001",
+			"complete",
+		);
+
+		expect(result.success).toBe(true);
+		expect(result.content).toContain("- [x] `task-001`");
+		expect(result.content).toContain("  - depends: task-000");
+		expect(result.content).toContain("  - started: 2024-01-01T10:00:00Z");
+		expect(result.content).toContain("  - verify: `bun test`");
+		expect(result.content).toContain("  - completed: TIMESTAMP");
+	});
+
+	test("handles metadata with completed before started", () => {
+		const content = `## M1
+
+- [x] \`task-001\` First task
+  - completed: 2024-01-01T11:00:00Z
+  - started: 2024-01-01T10:00:00Z`;
+
+		const result = updateStructuredTaskStatusContent(
+			content,
+			"task-001",
+			"complete",
+		);
+
+		expect(result.success).toBe(true);
+		// Old completed should be removed, started preserved, new completed added
+		expect(result.content).toContain("  - started: 2024-01-01T10:00:00Z");
+		expect(result.content).toContain("  - completed: TIMESTAMP");
+		expect(result.content).not.toContain("2024-01-01T11:00:00Z");
+	});
+
+	test("status transition: todo -> in-progress -> complete", () => {
+		let content = `## M1
+
+- [ ] \`task-001\` First task`;
+
+		// todo -> in-progress
+		let result = updateStructuredTaskStatusContent(
+			content,
+			"task-001",
+			"in-progress",
+		);
+		expect(result.success).toBe(true);
+		expect(result.content).toContain("- [/] `task-001`");
+		expect(result.content).toContain("  - started: TIMESTAMP");
+
+		// in-progress -> complete (simulate by using the updated content with a real started time)
+		content = `## M1
+
+- [/] \`task-001\` First task
+  - started: 2024-01-01T10:00:00Z`;
+
+		result = updateStructuredTaskStatusContent(content, "task-001", "complete");
+		expect(result.success).toBe(true);
+		expect(result.content).toContain("- [x] `task-001`");
+		expect(result.content).toContain("  - started: 2024-01-01T10:00:00Z");
+		expect(result.content).toContain("  - completed: TIMESTAMP");
+	});
+
+	test("returns error for non-existent task", () => {
+		const content = `## M1
+
+- [ ] \`task-001\` First task`;
+
+		const result = updateStructuredTaskStatusContent(
+			content,
+			"task-999",
+			"complete",
+		);
+
+		expect(result.success).toBe(false);
+		expect(result.error).toBe("Task not found: task-999");
+	});
+
+	test("handles task without backticks", () => {
+		const content = `## M1
+
+- [ ] task-001 First task`;
+
+		const result = updateStructuredTaskStatusContent(
+			content,
+			"task-001",
+			"in-progress",
+		);
+
+		expect(result.success).toBe(true);
+		expect(result.content).toContain("- [/]");
+		expect(result.content).toContain("task-001");
+	});
+});
