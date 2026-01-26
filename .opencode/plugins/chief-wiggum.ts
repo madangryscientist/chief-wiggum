@@ -43,310 +43,329 @@ async function fetchJson<T>(
 	}
 }
 
-export const status = tool({
-	description:
-		"Get the current status of the chief-wiggum loop, including active state, iteration count, and history",
-	args: {},
-	async execute() {
-		const result = await fetchJson<{
-			active: boolean;
-			state: {
-				iteration: number;
-				maxIterations: number;
-				loopId?: string;
-				structuredTasksFile?: string;
-				milestoneFilter?: string;
-				startedAt: string;
-			} | null;
-			history: {
-				iterations: unknown[];
-				totalDurationMs: number;
-			} | null;
-			context: string | null;
-		}>("/status");
+export default async function ChiefWiggumPlugin() {
+	return {
+		tool: {
+			loop_status: tool({
+				description:
+					"Get the current status of the chief-wiggum loop. Use this to check if a loop is active and its progress.",
+				args: {},
+				async execute() {
+					const result = await fetchJson<{
+						active: boolean;
+						state: {
+							iteration: number;
+							maxIterations: number;
+							loopId?: string;
+							structuredTasksFile?: string;
+							milestoneFilter?: string;
+							startedAt: string;
+							prompt: string;
+						} | null;
+						history: {
+							iterations: Array<{
+								iteration: number;
+								durationMs: number;
+								completionDetected: boolean;
+								errors: string[];
+							}>;
+							totalDurationMs: number;
+						} | null;
+						context: string | null;
+					}>("/status");
 
-		if (result.error) {
-			return `Error: ${result.error}`;
-		}
+					if (result.error) {
+						return `Error: ${result.error}`;
+					}
 
-		return JSON.stringify(result.data, null, 2);
-	},
-});
+					const data = result.data;
+					if (!data) return "No data returned";
 
-export const start_loop = tool({
-	description:
-		"Start a new chief-wiggum iteration loop. Returns the prompt for the first iteration.",
-	args: {
-		promptFile: tool.schema
-			.string()
-			.optional()
-			.describe("Path to prompt file (relative to workspace)"),
-		prompt: tool.schema
-			.string()
-			.optional()
-			.describe("Direct prompt text (alternative to promptFile)"),
-		tasksFile: tool.schema
-			.string()
-			.optional()
-			.describe("Path to structured tasks file (e.g., docs/tasks.md)"),
-		milestone: tool.schema
-			.string()
-			.optional()
-			.describe("Milestone to filter tasks by (e.g., 'Milestone 1')"),
-	},
-	async execute(args) {
-		if (!args.promptFile && !args.prompt) {
-			return "Error: Either 'promptFile' or 'prompt' is required";
-		}
+					let output = "";
 
-		const result = await fetchJson<{
-			success: boolean;
-			error?: string;
-			loopId?: string;
-			prompt?: string;
-			task?: {
-				id: string;
-				title: string;
-				status: string;
-			};
-			iteration?: number;
-		}>("/start", {
-			method: "POST",
-			body: JSON.stringify({
-				promptFile: args.promptFile,
-				prompt: args.prompt,
-				tasksFile: args.tasksFile,
-				milestone: args.milestone,
+					if (data.active && data.state) {
+						const elapsed = Date.now() - new Date(data.state.startedAt).getTime();
+						const minutes = Math.floor(elapsed / 60000);
+						const seconds = Math.floor((elapsed % 60000) / 1000);
+						output += `LOOP ACTIVE\n`;
+						output += `  Loop ID: ${data.state.loopId || "unknown"}\n`;
+						output += `  Iteration: ${data.state.iteration}${data.state.maxIterations > 0 ? ` / ${data.state.maxIterations}` : " (unlimited)"}\n`;
+						output += `  Elapsed: ${minutes}m ${seconds}s\n`;
+						if (data.state.structuredTasksFile) {
+							output += `  Tasks file: ${data.state.structuredTasksFile}\n`;
+						}
+						if (data.state.milestoneFilter) {
+							output += `  Milestone: ${data.state.milestoneFilter}\n`;
+						}
+					} else {
+						output += `NO ACTIVE LOOP\n`;
+					}
+
+					if (data.history && data.history.iterations.length > 0) {
+						const totalMs = data.history.totalDurationMs;
+						const minutes = Math.floor(totalMs / 60000);
+						const seconds = Math.floor((totalMs % 60000) / 1000);
+						output += `\nHISTORY\n`;
+						output += `  Total iterations: ${data.history.iterations.length}\n`;
+						output += `  Total time: ${minutes}m ${seconds}s\n`;
+
+						const recent = data.history.iterations.slice(-3);
+						if (recent.length > 0) {
+							output += `  Recent:\n`;
+							for (const iter of recent) {
+								const status = iter.completionDetected
+									? "completed"
+									: iter.errors.length > 0
+										? "errors"
+										: "ok";
+								output += `    #${iter.iteration}: ${Math.round(iter.durationMs / 1000)}s (${status})\n`;
+							}
+						}
+					}
+
+					if (data.context) {
+						output += `\nPENDING CONTEXT: Yes (${data.context.length} chars)\n`;
+					}
+
+					return output;
+				},
 			}),
-		});
 
-		if (result.error) {
-			return `Error: ${result.error}`;
-		}
+			inject_context: tool({
+				description:
+					"Inject context into the running loop. The subagent will receive this on its next get_context call.",
+				args: {
+					text: tool.schema.string().describe("Context text to inject into the loop"),
+				},
+				async execute(args) {
+					const result = await fetchJson<{
+						success: boolean;
+						error?: string;
+					}>("/context", {
+						method: "POST",
+						body: JSON.stringify({ text: args.text }),
+					});
 
-		if (!result.data?.success) {
-			return `Error: ${result.data?.error || "Failed to start loop"}`;
-		}
+					if (result.error) {
+						return `Error: ${result.error}`;
+					}
 
-		return result.data.prompt || "Loop started but no prompt returned";
-	},
-});
+					if (!result.data?.success) {
+						return `Error: ${result.data?.error || "Failed to inject context"}`;
+					}
 
-export const complete_iteration = tool({
-	description:
-		"Record the completion of the current iteration. Returns the next action (continue, complete, or stop) and the prompt for the next iteration if continuing.",
-	args: {
-		filesModified: tool.schema
-			.array(tool.schema.string())
-			.optional()
-			.describe("List of files modified during this iteration"),
-		errors: tool.schema
-			.array(tool.schema.string())
-			.optional()
-			.describe("List of errors encountered during this iteration"),
-		notes: tool.schema
-			.string()
-			.optional()
-			.describe("Optional notes about this iteration"),
-		completionDetected: tool.schema
-			.boolean()
-			.optional()
-			.describe(
-				"Whether a completion promise was detected (e.g., COMPLETE or READY_FOR_NEXT_TASK)",
-			),
-	},
-	async execute(args) {
-		const result = await fetchJson<{
-			success: boolean;
-			error?: string;
-			next?: "continue" | "complete" | "stop";
-			iteration?: number;
-			task?: {
-				id: string;
-				title: string;
-				status: string;
-			};
-			prompt?: string;
-		}>("/iteration/complete", {
-			method: "POST",
-			body: JSON.stringify({
-				filesModified: args.filesModified || [],
-				errors: args.errors || [],
-				notes: args.notes,
-				completionDetected: args.completionDetected,
+					return `Context injected. The subagent will receive it on next get_context call.`;
+				},
 			}),
-		});
 
-		if (result.error) {
-			return `Error: ${result.error}`;
-		}
+			stop_loop: tool({
+				description:
+					"Stop the current chief-wiggum loop. The loop will end after the current iteration.",
+				args: {},
+				async execute() {
+					const result = await fetchJson<{
+						success: boolean;
+						error?: string;
+						stoppedAt?: string;
+						iteration?: number;
+					}>("/stop", {
+						method: "POST",
+					});
 
-		if (!result.data?.success) {
-			return `Error: ${result.data?.error || "Failed to complete iteration"}`;
-		}
+					if (result.error) {
+						return `Error: ${result.error}`;
+					}
 
-		const data = result.data;
+					if (!result.data?.success) {
+						return `Error: ${result.data?.error || "Failed to stop loop"}`;
+					}
 
-		if (data.next === "complete") {
-			return "LOOP_COMPLETE: All tasks have been completed. The loop has ended.";
-		}
-
-		if (data.next === "stop") {
-			return "LOOP_STOPPED: The loop was stopped. No further iterations will occur.";
-		}
-
-		if (data.next === "continue" && data.prompt) {
-			return data.prompt;
-		}
-
-		return JSON.stringify(data, null, 2);
-	},
-});
-
-export const next_task = tool({
-	description:
-		"Get the next available task from the task list. Returns the task details or indicates if all tasks are complete.",
-	args: {},
-	async execute() {
-		const result = await fetchJson<{
-			hasTask: boolean;
-			complete: boolean;
-			reason?: string;
-			task?: {
-				id: string;
-				title: string;
-				milestone: string | null;
-				status: string;
-				depends: string[];
-				verify: string | null;
-			};
-		}>("/next-task");
-
-		if (result.error) {
-			return `Error: ${result.error}`;
-		}
-
-		const data = result.data;
-
-		if (data?.complete) {
-			return `ALL_TASKS_COMPLETE: ${data.reason || "All tasks have been completed"}`;
-		}
-
-		if (!data?.hasTask) {
-			return `NO_TASK_AVAILABLE: ${data?.reason || "No task available"}`;
-		}
-
-		if (data?.task) {
-			const task = data.task;
-			let response = `NEXT_TASK:\n`;
-			response += `  ID: ${task.id}\n`;
-			response += `  Title: ${task.title}\n`;
-			response += `  Status: ${task.status}\n`;
-			if (task.milestone) response += `  Milestone: ${task.milestone}\n`;
-			if (task.depends.length > 0)
-				response += `  Dependencies: ${task.depends.join(", ")}\n`;
-			if (task.verify) response += `  Verify: ${task.verify}\n`;
-			return response;
-		}
-
-		return JSON.stringify(data, null, 2);
-	},
-});
-
-export const get_context = tool({
-	description:
-		"Get any pending context that was injected into the loop. The context is cleared after being retrieved.",
-	args: {},
-	async execute() {
-		const result = await fetchJson<{
-			hasContext: boolean;
-			context: string | null;
-			clearedAt?: string;
-		}>("/context");
-
-		if (result.error) {
-			return `Error: ${result.error}`;
-		}
-
-		if (!result.data?.hasContext) {
-			return "NO_CONTEXT: No pending context available";
-		}
-
-		return `CONTEXT_RECEIVED:\n${result.data.context}`;
-	},
-});
-
-export const mark_task = tool({
-	description:
-		"Mark a task's status in the structured tasks file. Use this to mark tasks as in-progress, complete, or todo.",
-	args: {
-		taskId: tool.schema.string().describe("The ID of the task to mark"),
-		status: tool.schema
-			.enum(["todo", "in-progress", "complete"])
-			.describe("The new status for the task"),
-	},
-	async execute(args) {
-		const result = await fetchJson<{
-			success: boolean;
-			error?: string;
-			taskId?: string;
-			status?: string;
-			updatedAt?: string;
-		}>("/task/mark", {
-			method: "POST",
-			body: JSON.stringify({
-				taskId: args.taskId,
-				status: args.status,
+					return `Loop stopped at iteration ${result.data.iteration}`;
+				},
 			}),
-		});
 
-		if (result.error) {
-			return `Error: ${result.error}`;
-		}
+			list_tasks: tool({
+				description:
+					"List all tasks from the structured tasks file with their current status.",
+				args: {},
+				async execute() {
+					const result = await fetchJson<{
+						total: number;
+						complete: number;
+						inProgress: number;
+						todo: number;
+						tasks: Array<{
+							id: string;
+							title: string;
+							milestone: string | null;
+							status: "todo" | "in-progress" | "complete";
+							depends: string[];
+						}>;
+					}>("/tasks");
 
-		if (!result.data?.success) {
-			return `Error: ${result.data?.error || "Failed to mark task"}`;
-		}
+					if (result.error) {
+						return `Error: ${result.error}`;
+					}
 
-		return `Task ${args.taskId} marked as ${args.status}`;
-	},
-});
+					const data = result.data;
+					if (!data) return "No data returned";
 
-export const stop = tool({
-	description:
-		"Stop the current chief-wiggum loop. The loop will end after the current iteration.",
-	args: {},
-	async execute() {
-		const result = await fetchJson<{
-			success: boolean;
-			error?: string;
-			stoppedAt?: string;
-			iteration?: number;
-		}>("/stop", {
-			method: "POST",
-		});
+					let output = `TASKS: ${data.complete}/${data.total} complete`;
+					if (data.inProgress > 0) output += `, ${data.inProgress} in progress`;
+					if (data.todo > 0) output += `, ${data.todo} pending`;
+					output += "\n\n";
 
-		if (result.error) {
-			return `Error: ${result.error}`;
-		}
+					for (const task of data.tasks) {
+						const icon =
+							task.status === "complete"
+								? "[x]"
+								: task.status === "in-progress"
+									? "[/]"
+									: "[ ]";
+						output += `${icon} ${task.id}: ${task.title}`;
+						if (task.milestone) output += ` (${task.milestone})`;
+						output += "\n";
+					}
 
-		if (!result.data?.success) {
-			return `Error: ${result.data?.error || "Failed to stop loop"}`;
-		}
+					return output;
+				},
+			}),
 
-		return `Loop stopped at iteration ${result.data.iteration}`;
-	},
-});
+			summarize_loop: tool({
+				description:
+					"Get a summary of the loop history including iterations, time spent, and any errors.",
+				args: {},
+				async execute() {
+					const result = await fetchJson<{
+						iterations: Array<{
+							iteration: number;
+							startedAt: string;
+							endedAt: string;
+							durationMs: number;
+							toolsUsed: Record<string, number>;
+							filesModified: string[];
+							exitCode: number;
+							completionDetected: boolean;
+							errors: string[];
+						}>;
+						totalDurationMs: number;
+						struggleIndicators: {
+							repeatedErrors: Record<string, number>;
+							noProgressIterations: number;
+							shortIterations: number;
+						};
+					}>("/history");
 
-export default {
-	name: "chief-wiggum",
-	tools: {
-		status,
-		start_loop,
-		complete_iteration,
-		next_task,
-		get_context,
-		mark_task,
-		stop,
-	},
-} satisfies Plugin;
+					if (result.error) {
+						return `Error: ${result.error}`;
+					}
+
+					const data = result.data;
+					if (!data) return "No data returned";
+
+					if (data.iterations.length === 0) {
+						return "No iteration history available.";
+					}
+
+					const totalMs = data.totalDurationMs;
+					const minutes = Math.floor(totalMs / 60000);
+					const seconds = Math.floor((totalMs % 60000) / 1000);
+
+					let output = `LOOP SUMMARY\n`;
+					output += `  Iterations: ${data.iterations.length}\n`;
+					output += `  Total time: ${minutes}m ${seconds}s\n`;
+					output += `  Avg per iteration: ${Math.round(totalMs / data.iterations.length / 1000)}s\n`;
+
+					const completions = data.iterations.filter(
+						(i) => i.completionDetected,
+					).length;
+					const withErrors = data.iterations.filter(
+						(i) => i.errors.length > 0,
+					).length;
+					output += `  Completions detected: ${completions}\n`;
+					output += `  Iterations with errors: ${withErrors}\n`;
+
+					const allTools: Record<string, number> = {};
+					for (const iter of data.iterations) {
+						for (const [toolName, count] of Object.entries(iter.toolsUsed)) {
+							allTools[toolName] = (allTools[toolName] || 0) + count;
+						}
+					}
+					const topTools = Object.entries(allTools)
+						.sort((a, b) => b[1] - a[1])
+						.slice(0, 5);
+					if (topTools.length > 0) {
+						output += `\nTOP TOOLS:\n`;
+						for (const [toolName, count] of topTools) {
+							output += `  ${toolName}: ${count}\n`;
+						}
+					}
+
+					const allFiles = new Set<string>();
+					for (const iter of data.iterations) {
+						for (const file of iter.filesModified) {
+							allFiles.add(file);
+						}
+					}
+					if (allFiles.size > 0) {
+						output += `\nFILES MODIFIED: ${allFiles.size}\n`;
+						for (const file of Array.from(allFiles).slice(0, 10)) {
+							output += `  ${file}\n`;
+						}
+						if (allFiles.size > 10) {
+							output += `  ... and ${allFiles.size - 10} more\n`;
+						}
+					}
+
+					const struggles = data.struggleIndicators;
+					if (
+						struggles.noProgressIterations > 0 ||
+						struggles.shortIterations > 0 ||
+						Object.keys(struggles.repeatedErrors).length > 0
+					) {
+						output += `\nSTRUGGLE INDICATORS:\n`;
+						if (struggles.noProgressIterations > 0) {
+							output += `  No-progress iterations: ${struggles.noProgressIterations}\n`;
+						}
+						if (struggles.shortIterations > 0) {
+							output += `  Short iterations: ${struggles.shortIterations}\n`;
+						}
+						const repeatedErrs = Object.entries(struggles.repeatedErrors);
+						if (repeatedErrs.length > 0) {
+							output += `  Repeated errors:\n`;
+							for (const [err, count] of repeatedErrs.slice(0, 3)) {
+								output += `    "${err.slice(0, 50)}...": ${count}x\n`;
+							}
+						}
+					}
+
+					return output;
+				},
+			}),
+
+			health_check: tool({
+				description: "Check if the chief-wiggum server is running and healthy.",
+				args: {},
+				async execute() {
+					const result = await fetchJson<{
+						status: string;
+						version: string;
+						uptime: number;
+					}>("/health");
+
+					if (result.error) {
+						return `Server not available: ${result.error}`;
+					}
+
+					const data = result.data;
+					if (!data) return "No data returned";
+
+					const uptimeMin = Math.floor(data.uptime / 60);
+					const uptimeSec = Math.round(data.uptime % 60);
+
+					return `Server OK\n  Version: ${data.version}\n  Uptime: ${uptimeMin}m ${uptimeSec}s`;
+				},
+			}),
+		},
+	};
+}
