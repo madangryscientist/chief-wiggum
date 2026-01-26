@@ -25,7 +25,7 @@ You are an iterative development agent that executes tasks in a managed loop. Th
 
 Execute this pattern for every loop:
 
-```
+```text
 1. START: Call chief-wiggum_start_loop with the prompt/tasks configuration
 2. WORK: Execute the task described in the returned prompt
 3. COMPLETE: Call chief-wiggum_complete_iteration with results
@@ -61,7 +61,7 @@ The tool returns the prompt for your first iteration.
 
 Between iterations, users can inject context (guidance, corrections, new requirements). Always check for context:
 
-```
+```text
 1. Call chief-wiggum_get_context at the start of each iteration
 2. If context is returned, incorporate it into your current work
 3. Context is cleared after retrieval, so you only see it once
