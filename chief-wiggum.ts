@@ -237,6 +237,7 @@ const FLAG_DEFS: Record<string, FlagDef> = {
 	"--prompt": { key: "prompt", hasValue: true },
 	"-n": { key: "iterations", hasValue: true, default: "0" },
 	"--iterations": { key: "iterations", hasValue: true, default: "0" },
+	"--count": { key: "count", hasValue: true, default: "5" },
 	"-m": { key: "model", hasValue: true },
 	"--model": { key: "model", hasValue: true },
 	"-a": { key: "agent", hasValue: true },
@@ -266,7 +267,7 @@ const FLAG_DEFS: Record<string, FlagDef> = {
 	"--clear": { key: "clear", hasValue: false },
 };
 
-const COMMANDS = ["run", "status", "context", "tasks"];
+const COMMANDS = ["run", "status", "context", "tasks", "logs"];
 
 function parseArgs(argv: string[]): ParsedArgs {
 	const result: ParsedArgs = { command: "", args: [], flags: {} };
@@ -311,6 +312,7 @@ Commands:
   status           Show loop status and history  
   context <text>   Add context for next iteration
   tasks            List/manage tasks
+  logs             Summarize and manage logs
 
 Run 'chief-wiggum <command> --help' for command-specific help.
 
@@ -319,6 +321,7 @@ Examples:
   chief-wiggum status
   chief-wiggum context "focus on the auth module"
   chief-wiggum tasks add "fix the login bug"
+  chief-wiggum logs
 `;
 
 const HELP_RUN = `
@@ -331,7 +334,7 @@ Usage:
 Core Options:
   -f, --prompt <file>     Prompt file path
   -n, --iterations <n>    Max iterations (0=unlimited, default: 0)
-  -m, --model <name>      Model to use (default: anthropic/claude-sonnet-4-5)
+  -m, --model <name>      Model to use (default: anthropic/claude-opus-4-5)
   -a, --agent <type>      Agent: opencode (default), claude-code, codex
 
 Tasks:
@@ -406,6 +409,23 @@ Examples:
   chief-wiggum tasks
   chief-wiggum tasks add "implement user login"
   chief-wiggum tasks rm 3
+`;
+
+const HELP_LOGS = `
+chief-wiggum logs - Summarize and manage log files
+
+Usage:
+  chief-wiggum logs              Summarize recent logs
+  chief-wiggum logs archive      Archive old logs to .ralph/logs/archive/
+
+Options:
+  -w, --workspace <dir>   Target different directory
+  -n, --count <n>         Number of recent logs to show (default: 5)
+
+Examples:
+  chief-wiggum logs
+  chief-wiggum logs -n 10
+  chief-wiggum logs archive
 `;
 
 // ============================================================================
@@ -1778,6 +1798,208 @@ function cmdTasks(
 }
 
 // ============================================================================
+// Command: logs
+// ============================================================================
+
+interface LogFileSummary {
+	filename: string;
+	path: string;
+	milestone: string;
+	timestamp: Date;
+	sizeBytes: number;
+	lineCount: number;
+	iterations: number;
+	toolsUsed: Record<string, number>;
+	duration: string | null;
+}
+
+function parseLogFile(filePath: string): LogFileSummary | null {
+	try {
+		const content = readFileSync(filePath, "utf-8");
+		const lines = content.split("\n");
+		const filename = filePath.split("/").pop() || "";
+
+		// Parse filename: <milestone>-<timestamp>.log
+		const match = filename.match(/^(.+)-(\d{4}-\d{2}-\d{2}T\d{2}-\d{2}-\d{2})\.log$/);
+		const milestone = match?.[1] || "unknown";
+		const timestampStr = match?.[2]?.replace(/-/g, (m, i) => (i > 9 ? ":" : "-")) || "";
+		const timestamp = new Date(timestampStr.replace(/T(\d{2})-(\d{2})-(\d{2})/, "T$1:$2:$3"));
+
+		// Count iterations
+		const iterationMatches = content.match(/🔄 Iteration \d+/g);
+		const iterations = iterationMatches?.length || 0;
+
+		// Parse tools used
+		const toolsUsed: Record<string, number> = {};
+		const toolMatches = content.matchAll(/\| Tools\s+(.+)/g);
+		for (const toolMatch of toolMatches) {
+			const toolLine = toolMatch[1];
+			const toolParts = toolLine.split("•").map((s) => s.trim());
+			for (const part of toolParts) {
+				const [name, countStr] = part.split(/\s+/);
+				if (name && countStr) {
+					const count = parseInt(countStr, 10) || 0;
+					toolsUsed[name] = (toolsUsed[name] || 0) + count;
+				}
+			}
+		}
+
+		// Try to find duration
+		const durationMatch = content.match(/Total time:\s+(.+)/);
+		const duration = durationMatch?.[1] || null;
+
+		const stats = Bun.file(filePath);
+
+		return {
+			filename,
+			path: filePath,
+			milestone,
+			timestamp,
+			sizeBytes: stats.size,
+			lineCount: lines.length,
+			iterations,
+			toolsUsed,
+			duration,
+		};
+	} catch {
+		return null;
+	}
+}
+
+function formatBytes(bytes: number): string {
+	if (bytes < 1024) return `${bytes} B`;
+	if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
+	return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
+}
+
+async function cmdLogs(
+	args: string[],
+	flags: Record<string, string | boolean>,
+): Promise<void> {
+	if (flags.workspace) workspaceRoot = flags.workspace as string;
+
+	const logDir = getLogDir();
+	const subcommand = args[0] || "list";
+
+	if (subcommand === "archive") {
+		// Archive old logs
+		if (!existsSync(logDir)) {
+			console.log("ℹ️  No logs directory found");
+			return;
+		}
+
+		const archiveDir = join(logDir, "archive");
+		if (!existsSync(archiveDir)) mkdirSync(archiveDir, { recursive: true });
+
+		const files = await Array.fromAsync(
+			new Bun.Glob("*.log").scan({ cwd: logDir, onlyFiles: true }),
+		);
+
+		if (files.length === 0) {
+			console.log("ℹ️  No log files to archive");
+			return;
+		}
+
+		// Keep the 5 most recent, archive the rest
+		const summaries = files
+			.map((f) => parseLogFile(join(logDir, f)))
+			.filter((s): s is LogFileSummary => s !== null)
+			.sort((a, b) => b.timestamp.getTime() - a.timestamp.getTime());
+
+		const toArchive = summaries.slice(5);
+		if (toArchive.length === 0) {
+			console.log("ℹ️  Only 5 or fewer logs exist, nothing to archive");
+			return;
+		}
+
+		let totalSize = 0;
+		for (const log of toArchive) {
+			const src = log.path;
+			const dest = join(archiveDir, log.filename);
+			copyFileSync(src, dest);
+			unlinkSync(src);
+			totalSize += log.sizeBytes;
+		}
+
+		console.log(`✅ Archived ${toArchive.length} log files (${formatBytes(totalSize)})`);
+		console.log(`   Location: ${archiveDir}`);
+		return;
+	}
+
+	// Default: summarize logs
+	if (!existsSync(logDir)) {
+		console.log("ℹ️  No logs directory found");
+		console.log("   Run with --log flag to enable logging");
+		return;
+	}
+
+	const files = await Array.fromAsync(
+		new Bun.Glob("*.log").scan({ cwd: logDir, onlyFiles: true }),
+	);
+
+	if (files.length === 0) {
+		console.log("ℹ️  No log files found");
+		return;
+	}
+
+	const count = parseInt((flags.count as string) || "5", 10) || 5;
+
+	const summaries = files
+		.map((f) => parseLogFile(join(logDir, f)))
+		.filter((s): s is LogFileSummary => s !== null)
+		.sort((a, b) => b.timestamp.getTime() - a.timestamp.getTime())
+		.slice(0, count);
+
+	console.log(`
+╔══════════════════════════════════════════════════════════════════╗
+║                    Ralph Loop - Log Summary                      ║
+╚══════════════════════════════════════════════════════════════════╝
+`);
+
+	console.log(`Found ${files.length} log files, showing ${summaries.length} most recent:\n`);
+
+	for (const log of summaries) {
+		const topTools = Object.entries(log.toolsUsed)
+			.sort((a, b) => b[1] - a[1])
+			.slice(0, 4)
+			.map(([name, count]) => `${name}:${count}`)
+			.join(" ");
+
+		console.log(`📄 ${log.filename}`);
+		console.log(`   Milestone:   ${log.milestone}`);
+		console.log(`   Date:        ${log.timestamp.toLocaleString()}`);
+		console.log(`   Iterations:  ${log.iterations}`);
+		console.log(`   Size:        ${formatBytes(log.sizeBytes)} (${log.lineCount} lines)`);
+		if (log.duration) console.log(`   Duration:    ${log.duration}`);
+		if (topTools) console.log(`   Top Tools:   ${topTools}`);
+		console.log("");
+	}
+
+	// Show total stats
+	const totalSize = summaries.reduce((sum, log) => sum + log.sizeBytes, 0);
+	const totalIterations = summaries.reduce((sum, log) => sum + log.iterations, 0);
+
+	console.log("─".repeat(68));
+	console.log(`Total: ${formatBytes(totalSize)} across ${summaries.length} logs, ${totalIterations} iterations`);
+
+	// Check for archived logs
+	const archiveDir = join(logDir, "archive");
+	if (existsSync(archiveDir)) {
+		const archivedFiles = await Array.fromAsync(
+			new Bun.Glob("*.log").scan({ cwd: archiveDir, onlyFiles: true }),
+		);
+		if (archivedFiles.length > 0) {
+			console.log(`\n📦 ${archivedFiles.length} archived logs in ${archiveDir}`);
+		}
+	}
+
+	if (files.length > count) {
+		console.log(`\nUse 'chief-wiggum logs -n ${files.length}' to see all logs`);
+		console.log(`Use 'chief-wiggum logs archive' to archive old logs`);
+	}
+}
+
+// ============================================================================
 // Command: run
 // ============================================================================
 
@@ -1789,7 +2011,7 @@ async function cmdRun(
 	const opts: RunOptions = {
 		prompt: "",
 		promptFile: (flags.prompt as string) || "",
-		model: (flags.model as string) || "anthropic/claude-sonnet-4-5",
+		model: (flags.model as string) || "anthropic/claude-opus-4-5",
 		agent: ((flags.agent as string) || "opencode") as AgentType,
 		iterations: parseInt((flags.iterations as string) || "0", 10) || 0,
 		tasksFile: (flags.tasksFile as string) || null,
@@ -2279,6 +2501,9 @@ async function main(): Promise<void> {
 			case "tasks":
 				console.log(HELP_TASKS);
 				break;
+			case "logs":
+				console.log(HELP_LOGS);
+				break;
 			default:
 				console.log(HELP_MAIN);
 		}
@@ -2300,6 +2525,9 @@ async function main(): Promise<void> {
 			break;
 		case "tasks":
 			cmdTasks(parsed.args, parsed.flags);
+			break;
+		case "logs":
+			await cmdLogs(parsed.args, parsed.flags);
 			break;
 		default:
 			await cmdRun(parsed.args, parsed.flags);
