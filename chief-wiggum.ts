@@ -2216,6 +2216,12 @@ function cmdServe(flags: Record<string, string | boolean>): void {
 							return resp;
 						}
 					})();
+				} else if (method === "GET" && path === "/health") {
+					response = jsonResponse({
+						status: "healthy",
+						version: VERSION,
+						uptime: process.uptime(),
+					});
 				} else if (method === "POST" && path === "/stop") {
 					const state = loadState();
 					if (!state?.active) {
@@ -2276,6 +2282,7 @@ function cmdServe(flags: Record<string, string | boolean>): void {
 		console.log(`   Tasks file: ${structuredTasksFile}`);
 	}
 	console.log(`\n   Endpoints:`);
+	console.log(`   GET  /health            - Health check`);
 	console.log(`   GET  /status            - Current loop state`);
 	console.log(`   GET  /history           - Iteration history`);
 	console.log(`   GET  /tasks             - Task list and summary`);
@@ -2288,6 +2295,21 @@ function cmdServe(flags: Record<string, string | boolean>): void {
 	console.log(`   POST /stop              - Stop active loop`);
 	console.log(`   WS   /events            - Real-time event stream`);
 	console.log(`\n   Press Ctrl+C to stop\n`);
+
+	const shutdown = () => {
+		console.log("\n🛑 Shutting down gracefully...");
+		wsManager.broadcast({
+			type: "loop.stopped",
+			reason: "Server shutting down",
+			loopId: loadState()?.loopId || "",
+			iteration: loadState()?.iteration || 0,
+		});
+		server.stop();
+		process.exit(0);
+	};
+
+	process.on("SIGINT", shutdown);
+	process.on("SIGTERM", shutdown);
 }
 
 // ============================================================================
@@ -2306,6 +2328,7 @@ Options:
   -t, --tasks-file <path> Specify structured tasks file
 
 Endpoints:
+  GET  /health            - Health check (returns status, version, uptime)
   GET  /status            - Current loop state as JSON
   GET  /history           - Iteration history as JSON
   GET  /tasks             - Task list and summary as JSON
