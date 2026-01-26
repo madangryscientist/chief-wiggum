@@ -450,36 +450,12 @@ Examples:
 // Utility functions
 // ============================================================================
 
-// biome-ignore lint/suspicious/noControlCharactersInRegex: ANSI escape codes require control characters
-const ANSI_REGEX = /\x1B\[[0-9;]*m/g;
-
-function stripAnsi(input: string): string {
-	return input.replace(ANSI_REGEX, "");
-}
-
-function formatDuration(ms: number): string {
-	const totalSeconds = Math.max(0, Math.floor(ms / 1000));
-	const hours = Math.floor(totalSeconds / 3600);
-	const minutes = Math.floor((totalSeconds % 3600) / 60);
-	const seconds = totalSeconds % 60;
-	if (hours > 0)
-		return `${hours}:${String(minutes).padStart(2, "0")}:${String(seconds).padStart(2, "0")}`;
-	return `${minutes}:${String(seconds).padStart(2, "0")}`;
-}
-
-function formatDurationLong(ms: number): string {
-	const totalSeconds = Math.max(0, Math.floor(ms / 1000));
-	const hours = Math.floor(totalSeconds / 3600);
-	const minutes = Math.floor((totalSeconds % 3600) / 60);
-	const seconds = totalSeconds % 60;
-	if (hours > 0) return `${hours}h ${minutes}m ${seconds}s`;
-	if (minutes > 0) return `${minutes}m ${seconds}s`;
-	return `${seconds}s`;
-}
-
-function escapeRegex(str: string): string {
-	return str.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-}
+import {
+	escapeRegex,
+	formatDuration,
+	formatDurationLong,
+	stripAnsi,
+} from "./utils";
 
 async function killProcessTree(pid: number): Promise<void> {
 	if (process.platform === "darwin" || process.platform === "linux") {
@@ -1838,10 +1814,15 @@ function parseLogFile(filePath: string): LogFileSummary | null {
 		const filename = filePath.split("/").pop() || "";
 
 		// Parse filename: <milestone>-<timestamp>.log
-		const match = filename.match(/^(.+)-(\d{4}-\d{2}-\d{2}T\d{2}-\d{2}-\d{2})\.log$/);
+		const match = filename.match(
+			/^(.+)-(\d{4}-\d{2}-\d{2}T\d{2}-\d{2}-\d{2})\.log$/,
+		);
 		const milestone = match?.[1] || "unknown";
-		const timestampStr = match?.[2]?.replace(/-/g, (m, i) => (i > 9 ? ":" : "-")) || "";
-		const timestamp = new Date(timestampStr.replace(/T(\d{2})-(\d{2})-(\d{2})/, "T$1:$2:$3"));
+		const timestampStr =
+			match?.[2]?.replace(/-/g, (m, i) => (i > 9 ? ":" : "-")) || "";
+		const timestamp = new Date(
+			timestampStr.replace(/T(\d{2})-(\d{2})-(\d{2})/, "T$1:$2:$3"),
+		);
 
 		// Count iterations
 		const iterationMatches = content.match(/🔄 Iteration \d+/g);
@@ -1940,7 +1921,9 @@ async function cmdLogs(
 			archivedSize += log.sizeBytes;
 		}
 
-		console.log(`✅ Archived ${toArchive.length} log files (${formatBytes(archivedSize)})`);
+		console.log(
+			`✅ Archived ${toArchive.length} log files (${formatBytes(archivedSize)})`,
+		);
 		console.log(`   Location: ${archiveDir}`);
 		return;
 	}
@@ -2030,8 +2013,9 @@ async function cmdSummary(
 				.filter((s): s is LogFileSummary => s !== null);
 		}
 
-		const allSummaries = [...mainSummaries, ...archivedSummaries]
-			.sort((a, b) => b.timestamp.getTime() - a.timestamp.getTime());
+		const allSummaries = [...mainSummaries, ...archivedSummaries].sort(
+			(a, b) => b.timestamp.getTime() - a.timestamp.getTime(),
+		);
 
 		if (allSummaries.length === 0) {
 			console.log("ℹ️  No log files found");
@@ -2060,8 +2044,14 @@ async function cmdSummary(
 		const milestones = [...new Set(allSummaries.map((l) => l.milestone))];
 
 		// Generate summary file
-		const summaryTimestamp = new Date().toISOString().replace(/[:.]/g, "-").slice(0, 19);
-		const summaryPath = join(getStateDir(), `session-summary-${summaryTimestamp}.md`);
+		const summaryTimestamp = new Date()
+			.toISOString()
+			.replace(/[:.]/g, "-")
+			.slice(0, 19);
+		const summaryPath = join(
+			getStateDir(),
+			`session-summary-${summaryTimestamp}.md`,
+		);
 
 		const summaryContent = `# Session Summary
 
@@ -2086,18 +2076,24 @@ ${allSummaries.map((log) => `| ${log.filename} | ${log.milestone} | ${log.iterat
 
 		console.log(`✅ Generated session summary`);
 		console.log(`   File: ${summaryPath}`);
-		console.log(`   Logs: ${allSummaries.length} files (${mainSummaries.length} active, ${archivedSummaries.length} archived)`);
+		console.log(
+			`   Logs: ${allSummaries.length} files (${mainSummaries.length} active, ${archivedSummaries.length} archived)`,
+		);
 		console.log(`   Iterations: ${totalIterations}`);
-		console.log(`   Tools: ${Object.keys(allToolsUsed).length} unique tools used`);
+		console.log(
+			`   Tools: ${Object.keys(allToolsUsed).length} unique tools used`,
+		);
 		return;
 	}
 
 	if (subcommand === "suggest") {
 		const suggestedTasksPath = getSuggestedTasksPath();
-		
+
 		if (!existsSync(suggestedTasksPath)) {
 			console.log("ℹ️  No suggested tasks found");
-			console.log("   Suggested tasks are generated during Ralph loop iterations");
+			console.log(
+				"   Suggested tasks are generated during Ralph loop iterations",
+			);
 			return;
 		}
 
