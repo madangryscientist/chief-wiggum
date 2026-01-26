@@ -76,6 +76,8 @@ context/
 node_modules/
 .ralph/ralph-loop.state.json
 .ralph/ralph-opencode.config.json
+.opencode/node_modules/
+.opencode/bun.lock
 
 # Build artifacts
 bin/*

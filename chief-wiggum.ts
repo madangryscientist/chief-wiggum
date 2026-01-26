@@ -220,6 +220,7 @@ const COMMANDS = [
 	"summary",
 	"stop",
 	"serve",
+	"run",
 ];
 
 function parseArgs(argv: string[]): ParsedArgs {
@@ -261,13 +262,13 @@ Usage:
   chief-wiggum [command] [options]
 
 Commands:
+  serve            Start HTTP server for state management (alias: run)
   status           Show loop status and history  
   context <text>   Add context for next iteration
   tasks            List/manage tasks
   logs             Print recent log output / archive logs
   summary          Generate summaries (logs, suggested tasks)
   stop             Stop an active loop
-  serve            Start HTTP server for state management
 
 Global Options:
   --json           Output as JSON (for programmatic use)
@@ -275,14 +276,12 @@ Global Options:
 Run 'chief-wiggum <command> --help' for command-specific help.
 
 Examples:
+  chief-wiggum serve --port 3456 --tasks-file docs/tasks.md
+  chief-wiggum run -w ~/project --tasks-file tasks.md
   chief-wiggum status
-  chief-wiggum status --json
   chief-wiggum context "focus on the auth module"
   chief-wiggum tasks --json
-  chief-wiggum logs
-  chief-wiggum summary logs
   chief-wiggum stop
-  chief-wiggum serve --port 3456
 `;
 
 const HELP_STATUS = `
@@ -2422,6 +2421,7 @@ async function main(): Promise<void> {
 			cmdStop(parsed.flags);
 			break;
 		case "serve":
+		case "run":
 			cmdServe(parsed.flags);
 			break;
 		default:
