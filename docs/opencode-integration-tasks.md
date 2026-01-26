@@ -4,18 +4,30 @@
 
 Prepare the CLI for programmatic use by adding JSON output and removing the old run mode.
 
-- [ ] `m1-01` Add `--json` flag to FLAG_DEFS in parseArgs (~line 230)
-- [ ] `m1-02` Add `--json` output mode to `cmdStatus` - output `{active, state, history, context}` as JSON when flag present
-- [ ] `m1-03` Add `--json` output mode to `cmdTasks` - output `{total, complete, inProgress, todo, tasks}` as JSON
-- [ ] `m1-04` Add `--json` output mode to `cmdContext` - output `{context}` or `{success, action}` as JSON
-- [ ] `m1-05` Add `stop` to COMMANDS array
-- [ ] `m1-06` Implement `cmdStop` function - sets `state.active = false`, outputs JSON result
-- [ ] `m1-07` Update `main()` to handle `stop` command
-- [ ] `m1-08` Update help text to document `stop` command and `--json` flag
-- [ ] `m1-09` Remove `cmdRun` function and all agent-spawning logic (AGENTS config, streamProcessOutput, etc.)
-- [ ] `m1-10` Remove unused imports and types after cmdRun removal
-- [ ] `m1-11` Run `bun test` and fix any failures
-- [ ] `m1-12` Run `npx biome check --write` to fix formatting
+- [x] `m1-01` Add `--json` flag to FLAG_DEFS in parseArgs (~line 230)
+  - completed: 2026-01-26T00:00:00.000Z
+- [x] `m1-02` Add `--json` output mode to `cmdStatus` - output `{active, state, history, context}` as JSON when flag present
+  - completed: 2026-01-26T00:00:00.000Z
+- [x] `m1-03` Add `--json` output mode to `cmdTasks` - output `{total, complete, inProgress, todo, tasks}` as JSON
+  - completed: 2026-01-26T00:00:00.000Z
+- [x] `m1-04` Add `--json` output mode to `cmdContext` - output `{context}` or `{success, action}` as JSON
+  - completed: 2026-01-26T00:00:00.000Z
+- [x] `m1-05` Add `stop` to COMMANDS array
+  - completed: 2026-01-26T00:00:00.000Z
+- [x] `m1-06` Implement `cmdStop` function - sets `state.active = false`, outputs JSON result
+  - completed: 2026-01-26T00:00:00.000Z
+- [x] `m1-07` Update `main()` to handle `stop` command
+  - completed: 2026-01-26T00:00:00.000Z
+- [x] `m1-08` Update help text to document `stop` command and `--json` flag
+  - completed: 2026-01-26T00:00:00.000Z
+- [x] `m1-09` Remove `cmdRun` function and all agent-spawning logic (AGENTS config, streamProcessOutput, etc.)
+  - completed: 2026-01-26T00:00:00.000Z
+- [x] `m1-10` Remove unused imports and types after cmdRun removal
+  - completed: 2026-01-26T00:00:00.000Z
+- [x] `m1-11` Run `bun test` and fix any failures
+  - completed: 2026-01-26T00:00:00.000Z
+- [x] `m1-12` Run `npx biome check --write` to fix formatting
+  - completed: 2026-01-26T16:37:00.000Z
 
 ## Milestone 2: WebSocket Server Foundation
 
