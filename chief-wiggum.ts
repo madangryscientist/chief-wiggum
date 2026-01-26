@@ -130,9 +130,19 @@ const FLAG_DEFS: Record<string, FlagDef> = {
 	"--workspace": { key: "workspace", hasValue: true },
 	"--clear": { key: "clear", hasValue: false },
 	"--json": { key: "json", hasValue: false },
+	"-p": { key: "port", hasValue: true, default: "3456" },
+	"--port": { key: "port", hasValue: true, default: "3456" },
 };
 
-const COMMANDS = ["status", "context", "tasks", "logs", "summary", "stop"];
+const COMMANDS = [
+	"status",
+	"context",
+	"tasks",
+	"logs",
+	"summary",
+	"stop",
+	"serve",
+];
 
 function parseArgs(argv: string[]): ParsedArgs {
 	const result: ParsedArgs = { command: "", args: [], flags: {} };
@@ -179,6 +189,7 @@ Commands:
   logs             Print recent log output / archive logs
   summary          Generate summaries (logs, suggested tasks)
   stop             Stop an active loop
+  serve            Start HTTP server for state management
 
 Global Options:
   --json           Output as JSON (for programmatic use)
@@ -193,6 +204,7 @@ Examples:
   chief-wiggum logs
   chief-wiggum summary logs
   chief-wiggum stop
+  chief-wiggum serve --port 3456
 `;
 
 const HELP_STATUS = `
@@ -468,7 +480,7 @@ function parseStructuredTasks(content: string): ParsedTasksFile {
 		}
 
 		const taskMatch = line.match(
-			/^-\s+\[([ x/])\]\s+([a-zA-Z0-9_-]+):\s*(.+)$/,
+			/^-\s+\[([ x/])\]\s+`?([a-zA-Z0-9_-]+)`?\s+(.+)$/,
 		);
 		if (taskMatch) {
 			saveCurrentTask();
@@ -1454,6 +1466,236 @@ ${allSummaries.map((log) => `| ${log.filename} | ${log.milestone} | ${log.iterat
 }
 
 // ============================================================================
+// Command: serve
+// ============================================================================
+
+const CORS_HEADERS = {
+	"Access-Control-Allow-Origin": "*",
+	"Access-Control-Allow-Methods": "GET, POST, OPTIONS",
+	"Access-Control-Allow-Headers": "Content-Type",
+};
+
+function jsonResponse(data: unknown, status = 200): Response {
+	return new Response(JSON.stringify(data), {
+		status,
+		headers: {
+			"Content-Type": "application/json",
+			...CORS_HEADERS,
+		},
+	});
+}
+
+function logRequest(method: string, path: string, status: number): void {
+	const timestamp = new Date().toISOString();
+	console.log(`[${timestamp}] ${method} ${path} → ${status}`);
+}
+
+function cmdServe(flags: Record<string, string | boolean>): void {
+	if (flags.workspace) workspaceRoot = flags.workspace as string;
+	if (flags.tasksFile) structuredTasksFile = flags.tasksFile as string;
+
+	const port = parseInt((flags.port as string) || "3456", 10);
+
+	const server = Bun.serve({
+		port,
+		fetch(req) {
+			const url = new URL(req.url);
+			const path = url.pathname;
+			const method = req.method;
+
+			if (method === "OPTIONS") {
+				logRequest(method, path, 204);
+				return new Response(null, { status: 204, headers: CORS_HEADERS });
+			}
+
+			let response: Response;
+
+			try {
+				if (method === "GET" && path === "/status") {
+					const state = loadState();
+					const history = loadHistory();
+					const context = loadContext();
+					response = jsonResponse({
+						active: state?.active ?? false,
+						state: state ?? null,
+						history: history ?? null,
+						context: context ?? null,
+					});
+				} else if (method === "GET" && path === "/history") {
+					const history = loadHistory();
+					response = jsonResponse(history);
+				} else if (method === "GET" && path === "/tasks") {
+					if (structuredTasksFile) {
+						const data = loadStructuredTasks();
+						if (data) {
+							const allTasks = Array.from(data.allTasks.values());
+							const complete = allTasks.filter(
+								(t) => t.status === "complete",
+							).length;
+							const inProgress = allTasks.filter(
+								(t) => t.status === "in-progress",
+							).length;
+							const todo = allTasks.filter((t) => t.status === "todo").length;
+							response = jsonResponse({
+								total: allTasks.length,
+								complete,
+								inProgress,
+								todo,
+								tasks: allTasks,
+							});
+						} else {
+							response = jsonResponse({
+								total: 0,
+								complete: 0,
+								inProgress: 0,
+								todo: 0,
+								tasks: [],
+							});
+						}
+					} else {
+						const tasksPath = getTasksPath();
+						if (existsSync(tasksPath)) {
+							const content = readFileSync(tasksPath, "utf-8");
+							const tasks = parseTasks(content);
+							const complete = tasks.filter(
+								(t) => t.status === "complete",
+							).length;
+							const inProgress = tasks.filter(
+								(t) => t.status === "in-progress",
+							).length;
+							const todo = tasks.filter((t) => t.status === "todo").length;
+							response = jsonResponse({
+								total: tasks.length,
+								complete,
+								inProgress,
+								todo,
+								tasks,
+							});
+						} else {
+							response = jsonResponse({
+								total: 0,
+								complete: 0,
+								inProgress: 0,
+								todo: 0,
+								tasks: [],
+							});
+						}
+					}
+				} else if (method === "POST" && path === "/context") {
+					return (async () => {
+						try {
+							const body = await req.json();
+							const text = body.text as string;
+
+							if (!text) {
+								const resp = jsonResponse(
+									{ success: false, error: "Missing 'text' field" },
+									400,
+								);
+								logRequest(method, path, 400);
+								return resp;
+							}
+
+							const stateDir = getStateDir();
+							if (!existsSync(stateDir))
+								mkdirSync(stateDir, { recursive: true });
+
+							const timestamp = new Date().toISOString();
+							const newEntry = `\n## Context added at ${timestamp}\n${text}\n`;
+
+							const contextPath = getContextPath();
+							if (existsSync(contextPath)) {
+								const existing = readFileSync(contextPath, "utf-8");
+								writeFileSync(contextPath, existing + newEntry);
+							} else {
+								writeFileSync(contextPath, `# Ralph Loop Context\n${newEntry}`);
+							}
+
+							const resp = jsonResponse({ success: true, action: "added" });
+							logRequest(method, path, 200);
+							return resp;
+						} catch (e) {
+							const resp = jsonResponse(
+								{ success: false, error: "Invalid JSON body" },
+								400,
+							);
+							logRequest(method, path, 400);
+							return resp;
+						}
+					})();
+				} else if (method === "POST" && path === "/stop") {
+					const state = loadState();
+					if (!state?.active) {
+						response = jsonResponse({
+							success: false,
+							error: "No active loop to stop",
+						});
+					} else {
+						state.active = false;
+						saveState(state);
+						response = jsonResponse({
+							success: true,
+							stoppedAt: new Date().toISOString(),
+							iteration: state.iteration,
+						});
+					}
+				} else {
+					response = jsonResponse({ error: "Not found" }, 404);
+				}
+			} catch (error) {
+				const message =
+					error instanceof Error ? error.message : "Internal server error";
+				response = jsonResponse({ error: message }, 500);
+			}
+
+			logRequest(method, path, response.status);
+			return response;
+		},
+	});
+
+	console.log(`🚀 Chief Wiggum server running on http://localhost:${port}`);
+	console.log(`   Workspace: ${workspaceRoot}`);
+	if (structuredTasksFile) {
+		console.log(`   Tasks file: ${structuredTasksFile}`);
+	}
+	console.log(`\n   Endpoints:`);
+	console.log(`   GET  /status   - Current loop state`);
+	console.log(`   GET  /history  - Iteration history`);
+	console.log(`   GET  /tasks    - Task list and summary`);
+	console.log(`   POST /context  - Add context (body: {"text": "..."})`);
+	console.log(`   POST /stop     - Stop active loop`);
+	console.log(`\n   Press Ctrl+C to stop\n`);
+}
+
+// ============================================================================
+// Help: serve
+// ============================================================================
+
+const HELP_SERVE = `
+chief-wiggum serve - Start HTTP server for state management
+
+Usage:
+  chief-wiggum serve [options]
+
+Options:
+  -p, --port <port>       Port to listen on (default: 3456)
+  -w, --workspace <dir>   Target different directory
+  -t, --tasks-file <path> Specify structured tasks file
+
+Endpoints:
+  GET  /status   - Current loop state as JSON
+  GET  /history  - Iteration history as JSON
+  GET  /tasks    - Task list and summary as JSON
+  POST /context  - Add context (body: {"text": "..."})
+  POST /stop     - Stop active loop
+
+Examples:
+  chief-wiggum serve
+  chief-wiggum serve --port 8080
+  chief-wiggum serve -w ~/projects/my-app -t docs/tasks.md
+`;
+
+// ============================================================================
 // Main
 // ============================================================================
 
@@ -1486,6 +1728,9 @@ async function main(): Promise<void> {
 			case "stop":
 				console.log(HELP_STOP);
 				break;
+			case "serve":
+				console.log(HELP_SERVE);
+				break;
 			default:
 				console.log(HELP_MAIN);
 		}
@@ -1511,6 +1756,9 @@ async function main(): Promise<void> {
 			break;
 		case "stop":
 			cmdStop(parsed.flags);
+			break;
+		case "serve":
+			cmdServe(parsed.flags);
 			break;
 		default:
 			cmdStatus(parsed.flags);

@@ -33,19 +33,45 @@ Prepare the CLI for programmatic use by adding JSON output and removing the old 
 
 Create the `serve` command with basic HTTP endpoints.
 
-- [ ] `m2-01` Add `serve` to COMMANDS array
-- [ ] `m2-02` Add `--port` flag to FLAG_DEFS (default 3456)
-- [ ] `m2-03` Create `cmdServe` function skeleton that starts Bun.serve()
-- [ ] `m2-04` Implement GET `/status` endpoint - returns current state as JSON
-- [ ] `m2-05` Implement GET `/history` endpoint - returns iteration history as JSON
-- [ ] `m2-06` Implement GET `/tasks` endpoint - returns task summary and list as JSON
-- [ ] `m2-07` Implement POST `/context` endpoint - adds context, returns success
-- [ ] `m2-08` Implement POST `/stop` endpoint - signals stop, returns success
-- [ ] `m2-09` Add proper CORS headers for local development
-- [ ] `m2-10` Add request logging (method, path, status)
-- [ ] `m2-11` Update help text to document `serve` command
-- [ ] `m2-12` Test all HTTP endpoints with curl commands
-- [ ] `m2-13` Run `bun test` and `npx biome check --write`
+- [x] `m2-01` Add `serve` to COMMANDS array
+  - started: 2026-01-26T17:00:00.000Z
+  - completed: 2026-01-26T16:50:00.000Z
+- [x] `m2-02` Add `--port` flag to FLAG_DEFS (default 3456)
+  - started: 2026-01-26T17:00:00.000Z
+  - completed: 2026-01-26T16:50:00.000Z
+- [x] `m2-03` Create `cmdServe` function skeleton that starts Bun.serve()
+  - started: 2026-01-26T17:00:00.000Z
+  - completed: 2026-01-26T16:50:00.000Z
+- [x] `m2-04` Implement GET `/status` endpoint - returns current state as JSON
+  - started: 2026-01-26T17:00:00.000Z
+  - completed: 2026-01-26T16:50:00.000Z
+- [x] `m2-05` Implement GET `/history` endpoint - returns iteration history as JSON
+  - started: 2026-01-26T17:00:00.000Z
+  - completed: 2026-01-26T16:50:00.000Z
+- [x] `m2-06` Implement GET `/tasks` endpoint - returns task summary and list as JSON
+  - started: 2026-01-26T17:00:00.000Z
+  - completed: 2026-01-26T16:50:00.000Z
+- [x] `m2-07` Implement POST `/context` endpoint - adds context, returns success
+  - started: 2026-01-26T17:00:00.000Z
+  - completed: 2026-01-26T16:50:00.000Z
+- [x] `m2-08` Implement POST `/stop` endpoint - signals stop, returns success
+  - started: 2026-01-26T17:00:00.000Z
+  - completed: 2026-01-26T16:50:00.000Z
+- [x] `m2-09` Add proper CORS headers for local development
+  - started: 2026-01-26T17:00:00.000Z
+  - completed: 2026-01-26T16:50:00.000Z
+- [x] `m2-10` Add request logging (method, path, status)
+  - started: 2026-01-26T17:00:00.000Z
+  - completed: 2026-01-26T16:50:00.000Z
+- [x] `m2-11` Update help text to document `serve` command
+  - started: 2026-01-26T17:00:00.000Z
+  - completed: 2026-01-26T16:50:00.000Z
+- [x] `m2-12` Test all HTTP endpoints with curl commands
+  - started: 2026-01-26T16:50:00.000Z
+  - completed: 2026-01-26T16:50:00.000Z
+- [x] `m2-13` Run `bun test` and `npx biome check --write`
+  - started: 2026-01-26T16:50:00.000Z
+  - completed: 2026-01-26T16:50:00.000Z
 
 ## Milestone 3: Loop State Management Endpoints
 
