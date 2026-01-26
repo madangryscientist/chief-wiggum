@@ -175,13 +175,20 @@ Create the OpenCode plugin with custom tools.
 
 Create the chief-wiggum subagent definition.
 
-- [ ] `m6-01` Create `.opencode/agents/` directory
-- [ ] `m6-02` Create `.opencode/agents/chief-wiggum.md` with frontmatter (description, mode: subagent, tools)
-- [ ] `m6-03` Write subagent system prompt explaining its role as loop orchestrator
-- [ ] `m6-04` Document the loop pattern: start_loop → work → complete_iteration → next_task → repeat
-- [ ] `m6-05` Add instructions for checking/using injected context
-- [ ] `m6-06` Add instructions for error handling and recovery
-- [ ] `m6-07` Configure tool permissions: chief-wiggum_* allowed, read/write/edit/bash/glob/grep allowed
+- [x] `m6-01` Create `.opencode/agents/` directory
+  - completed: 2026-01-26T20:00:00.000Z
+- [x] `m6-02` Create `.opencode/agents/chief-wiggum.md` with frontmatter (description, mode: subagent, tools)
+  - completed: 2026-01-26T20:00:00.000Z
+- [x] `m6-03` Write subagent system prompt explaining its role as loop orchestrator
+  - completed: 2026-01-26T20:00:00.000Z
+- [x] `m6-04` Document the loop pattern: start_loop → work → complete_iteration → next_task → repeat
+  - completed: 2026-01-26T20:00:00.000Z
+- [x] `m6-05` Add instructions for checking/using injected context
+  - completed: 2026-01-26T20:00:00.000Z
+- [x] `m6-06` Add instructions for error handling and recovery
+  - completed: 2026-01-26T20:00:00.000Z
+- [x] `m6-07` Configure tool permissions: chief-wiggum_* allowed, read/write/edit/bash/glob/grep allowed
+  - completed: 2026-01-26T20:00:00.000Z
 - [ ] `m6-08` Test subagent can be invoked with @chief-wiggum
 - [ ] `m6-09` Test subagent can complete a simple single-task loop
 - [ ] `m6-10` Test subagent can complete a multi-task loop with tasks file
