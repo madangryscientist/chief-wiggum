@@ -89,10 +89,11 @@ curl -X POST http://localhost:3456/context \
 
 ## Commands
 
-### `serve` - Start the HTTP/WebSocket server
+### `serve` / `run` - Start the HTTP/WebSocket server
 
 ```bash
 chief-wiggum serve [options]
+chief-wiggum run [options]   # alias for serve
 
 Options:
   -p, --port <port>       Port to listen on (default: 3456)
@@ -179,6 +180,19 @@ The plugin provides 7 tools for the subagent:
 | `chief-wiggum_get_context` | Check for injected context |
 | `chief-wiggum_mark_task` | Update task status |
 | `chief-wiggum_stop` | Stop the loop |
+
+### Observer Plugin
+
+An additional plugin (`chief-wiggum-observer`) provides tools for the main chat:
+
+| Tool | Description |
+|------|-------------|
+| `chief-wiggum-observer_loop_status` | Check loop progress |
+| `chief-wiggum-observer_inject_context` | Send context to subagent |
+| `chief-wiggum-observer_stop_loop` | Stop the loop |
+| `chief-wiggum-observer_list_tasks` | Show all tasks |
+| `chief-wiggum-observer_summarize_loop` | Get iteration summary |
+| `chief-wiggum-observer_health_check` | Check server health |
 
 Configure the server URL via environment variable:
 ```bash
