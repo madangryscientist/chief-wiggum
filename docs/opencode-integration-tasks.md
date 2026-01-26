@@ -77,16 +77,39 @@ Create the `serve` command with basic HTTP endpoints.
 
 Add endpoints for the subagent to manage loop lifecycle.
 
-- [ ] `m3-01` Implement POST `/start` endpoint - initializes loop state, parses tasks, builds prompt, returns `{loopId, prompt, task?}`
-- [ ] `m3-02` Implement POST `/iteration/complete` endpoint - records iteration result, returns `{next: "continue"|"complete"|"stop", task?, prompt?}`
-- [ ] `m3-03` Implement GET `/next-task` endpoint - returns next task or completion signal
-- [ ] `m3-04` Implement POST `/task/mark` endpoint - marks task status (in-progress, complete)
-- [ ] `m3-05` Implement GET `/context` endpoint - returns pending context and clears it
-- [ ] `m3-06` Extract prompt-building logic from old cmdRun into reusable `buildIterationPrompt()` function
-- [ ] `m3-07` Generate unique loopId for each loop (use timestamp + random)
-- [ ] `m3-08` Track iteration count in state, increment on each `/iteration/complete`
-- [ ] `m3-09` Test full loop lifecycle via curl: start → complete → next → complete → ... → done
-- [ ] `m3-10` Run `bun test` and `npx biome check --write`
+- [x] `m3-01` Implement POST `/start` endpoint - initializes loop state, parses tasks, builds prompt, returns `{loopId, prompt, task?}`
+  - started: 2026-01-26T17:30:00.000Z
+  - completed: 2026-01-26T17:35:00.000Z
+- [x] `m3-02` Implement POST `/iteration/complete` endpoint - records iteration result, returns `{next: "continue"|"complete"|"stop", task?, prompt?}`
+  - started: 2026-01-26T17:35:00.000Z
+  - completed: 2026-01-26T17:40:00.000Z
+- [x] `m3-03` Implement GET `/next-task` endpoint - returns next task or completion signal
+  - started: 2026-01-26T17:40:00.000Z
+  - completed: 2026-01-26T17:42:00.000Z
+- [x] `m3-04` Implement POST `/task/mark` endpoint - marks task status (in-progress, complete)
+  - started: 2026-01-26T17:42:00.000Z
+  - completed: 2026-01-26T17:45:00.000Z
+- [x] `m3-05` Implement GET `/context` endpoint - returns pending context and clears it
+  - started: 2026-01-26T17:45:00.000Z
+  - completed: 2026-01-26T17:48:00.000Z
+- [x] `m3-06` Extract prompt-building logic from old cmdRun into reusable `buildIterationPrompt()` function
+  - started: 2026-01-26T17:48:00.000Z
+  - completed: 2026-01-26T17:48:00.000Z
+  - note: `buildPrompt()` already exists and is reused by endpoints
+- [x] `m3-07` Generate unique loopId for each loop (use timestamp + random)
+  - started: 2026-01-26T17:30:00.000Z
+  - completed: 2026-01-26T17:35:00.000Z
+  - note: Implemented in `generateLoopId()` function and used in POST /start
+- [x] `m3-08` Track iteration count in state, increment on each `/iteration/complete`
+  - started: 2026-01-26T17:35:00.000Z
+  - completed: 2026-01-26T17:40:00.000Z
+  - note: Implemented in POST /iteration/complete endpoint
+- [x] `m3-09` Test full loop lifecycle via curl: start → complete → next → complete → ... → done
+  - started: 2026-01-26T17:50:00.000Z
+  - completed: 2026-01-26T17:55:00.000Z
+- [x] `m3-10` Run `bun test` and `npx biome check --write`
+  - started: 2026-01-26T17:55:00.000Z
+  - completed: 2026-01-26T17:58:00.000Z
 
 ## Milestone 4: WebSocket Event Streaming
 

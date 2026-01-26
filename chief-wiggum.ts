@@ -585,6 +585,85 @@ function allStructuredTasksComplete(milestone: string | null): boolean {
 	return tasks.length > 0 && tasks.every((t) => t.status === "complete");
 }
 
+function updateStructuredTaskStatus(
+	taskId: string,
+	newStatus: "todo" | "in-progress" | "complete",
+): { success: boolean; error?: string } {
+	if (!structuredTasksFile) {
+		return { success: false, error: "No structured tasks file configured" };
+	}
+
+	const fullPath = join(workspaceRoot, structuredTasksFile);
+	if (!existsSync(fullPath)) {
+		return { success: false, error: "Tasks file not found" };
+	}
+
+	const content = readFileSync(fullPath, "utf-8");
+	const lines = content.split("\n");
+	const newLines: string[] = [];
+	let found = false;
+	let i = 0;
+
+	while (i < lines.length) {
+		const line = lines[i];
+		const taskMatch = line.match(
+			/^(-\s+\[)([ x/])(\]\s+`?)([a-zA-Z0-9_-]+)(`?\s+.+)$/,
+		);
+
+		if (taskMatch && taskMatch[4] === taskId) {
+			found = true;
+			const statusChar =
+				newStatus === "complete"
+					? "x"
+					: newStatus === "in-progress"
+						? "/"
+						: " ";
+			newLines.push(
+				`${taskMatch[1]}${statusChar}${taskMatch[3]}${taskMatch[4]}${taskMatch[5]}`,
+			);
+			i++;
+
+			// Check for existing metadata lines
+			const hasStarted = i < lines.length && lines[i].match(/^\s+-\s+started:/);
+			const hasCompleted =
+				i < lines.length &&
+				lines[i + (hasStarted ? 1 : 0)]?.match(/^\s+-\s+completed:/);
+
+			// Add or update metadata
+			if (newStatus === "in-progress" && !hasStarted) {
+				newLines.push(`  - started: ${new Date().toISOString()}`);
+			}
+
+			// Copy existing metadata lines
+			while (i < lines.length && lines[i].match(/^\s+-\s+\w+:/)) {
+				const metaLine = lines[i];
+				if (newStatus === "complete" && metaLine.match(/^\s+-\s+completed:/)) {
+					// Skip old completed line, we'll add new one
+					i++;
+					continue;
+				}
+				newLines.push(metaLine);
+				i++;
+			}
+
+			// Add completed timestamp if marking complete
+			if (newStatus === "complete" && !hasCompleted) {
+				newLines.push(`  - completed: ${new Date().toISOString()}`);
+			}
+		} else {
+			newLines.push(line);
+			i++;
+		}
+	}
+
+	if (!found) {
+		return { success: false, error: `Task not found: ${taskId}` };
+	}
+
+	writeFileSync(fullPath, newLines.join("\n"));
+	return { success: true };
+}
+
 function getStructuredTasksSummary(milestone: string | null): {
 	pending: number;
 	inProgress: number;
@@ -1466,6 +1545,16 @@ ${allSummaries.map((log) => `| ${log.filename} | ${log.milestone} | ${log.iterat
 }
 
 // ============================================================================
+// Loop ID generation
+// ============================================================================
+
+function generateLoopId(): string {
+	const timestamp = Date.now().toString(36);
+	const random = Math.random().toString(36).substring(2, 8);
+	return `${timestamp}-${random}`;
+}
+
+// ============================================================================
 // Command: serve
 // ============================================================================
 
@@ -1581,6 +1670,340 @@ function cmdServe(flags: Record<string, string | boolean>): void {
 							});
 						}
 					}
+				} else if (method === "POST" && path === "/start") {
+					return (async () => {
+						try {
+							const body = await req.json();
+							const promptFile = body.promptFile as string | undefined;
+							const promptText = body.prompt as string | undefined;
+							const tasksFile = body.tasksFile as string | undefined;
+							const milestone = body.milestone as string | undefined;
+
+							// Check if there's already an active loop
+							const existingState = loadState();
+							if (existingState?.active) {
+								const resp = jsonResponse(
+									{ success: false, error: "A loop is already active" },
+									400,
+								);
+								logRequest(method, path, 400);
+								return resp;
+							}
+
+							// Set tasks file if provided
+							if (tasksFile) {
+								structuredTasksFile = tasksFile;
+							}
+
+							// Build the prompt
+							let prompt = "";
+							if (promptFile) {
+								const promptPath = join(workspaceRoot, promptFile);
+								if (!existsSync(promptPath)) {
+									const resp = jsonResponse(
+										{
+											success: false,
+											error: `Prompt file not found: ${promptFile}`,
+										},
+										400,
+									);
+									logRequest(method, path, 400);
+									return resp;
+								}
+								prompt = readFileSync(promptPath, "utf-8");
+							} else if (promptText) {
+								prompt = promptText;
+							} else {
+								const resp = jsonResponse(
+									{
+										success: false,
+										error: "Either 'promptFile' or 'prompt' is required",
+									},
+									400,
+								);
+								logRequest(method, path, 400);
+								return resp;
+							}
+
+							// Generate loop ID
+							const loopId = generateLoopId();
+
+							// Create initial state
+							const newState: RalphState = {
+								active: true,
+								iteration: 1,
+								maxIterations: 0, // unlimited
+								completionPromise: "COMPLETE",
+								tasksMode: !!structuredTasksFile,
+								taskPromise: "READY_FOR_NEXT_TASK",
+								prompt,
+								startedAt: new Date().toISOString(),
+								workspaceRoot,
+								structuredTasksFile: structuredTasksFile || null,
+								milestoneFilter: milestone || null,
+								loopId,
+							};
+
+							saveState(newState);
+
+							// Clear any existing history for new loop
+							clearHistory();
+
+							// Build the iteration prompt
+							const iterationPrompt = buildPrompt(newState);
+
+							// Get the first task if in structured tasks mode
+							let task: StructuredTask | null = null;
+							if (structuredTasksFile) {
+								task = getNextStructuredTask(milestone || null);
+							}
+
+							const resp = jsonResponse({
+								success: true,
+								loopId,
+								prompt: iterationPrompt,
+								task: task || undefined,
+								iteration: 1,
+							});
+							logRequest(method, path, 200);
+							return resp;
+						} catch (e) {
+							const message =
+								e instanceof Error ? e.message : "Invalid request";
+							const resp = jsonResponse(
+								{ success: false, error: message },
+								400,
+							);
+							logRequest(method, path, 400);
+							return resp;
+						}
+					})();
+				} else if (method === "POST" && path === "/iteration/complete") {
+					return (async () => {
+						try {
+							const body = await req.json();
+							const filesModified = (body.filesModified as string[]) || [];
+							const errors = (body.errors as string[]) || [];
+							const notes = body.notes as string | undefined;
+							const completionDetected = body.completionDetected as
+								| boolean
+								| undefined;
+
+							const state = loadState();
+							if (!state?.active) {
+								const resp = jsonResponse(
+									{ success: false, error: "No active loop" },
+									400,
+								);
+								logRequest(method, path, 400);
+								return resp;
+							}
+
+							// Record iteration in history
+							const history = loadHistory();
+							const iterationRecord: IterationHistory = {
+								iteration: state.iteration,
+								startedAt: state.startedAt,
+								endedAt: new Date().toISOString(),
+								durationMs: Date.now() - new Date(state.startedAt).getTime(),
+								toolsUsed: {},
+								filesModified,
+								exitCode: errors.length > 0 ? 1 : 0,
+								completionDetected: completionDetected ?? false,
+								errors,
+							};
+							history.iterations.push(iterationRecord);
+							history.totalDurationMs += iterationRecord.durationMs;
+							saveHistory(history);
+
+							// Determine next action
+							let next: "continue" | "complete" | "stop" = "continue";
+							let task: StructuredTask | null = null;
+							let prompt: string | undefined;
+
+							// Check if loop was stopped
+							const currentState = loadState();
+							if (!currentState?.active) {
+								next = "stop";
+							} else if (completionDetected) {
+								// Check if all tasks are complete
+								if (state.structuredTasksFile) {
+									const allComplete = allStructuredTasksComplete(
+										state.milestoneFilter || null,
+									);
+									if (allComplete) {
+										next = "complete";
+										state.active = false;
+										saveState(state);
+									} else {
+										// Get next task
+										task = getNextStructuredTask(state.milestoneFilter || null);
+										if (!task) {
+											next = "complete";
+											state.active = false;
+											saveState(state);
+										}
+									}
+								} else {
+									next = "complete";
+									state.active = false;
+									saveState(state);
+								}
+							} else {
+								// Continue with next iteration
+								task = state.structuredTasksFile
+									? getNextStructuredTask(state.milestoneFilter || null)
+									: null;
+							}
+
+							// Increment iteration if continuing
+							if (next === "continue") {
+								state.iteration += 1;
+								state.startedAt = new Date().toISOString();
+								saveState(state);
+								prompt = buildPrompt(state);
+							}
+
+							const resp = jsonResponse({
+								success: true,
+								next,
+								iteration: state.iteration,
+								task: task || undefined,
+								prompt,
+							});
+							logRequest(method, path, 200);
+							return resp;
+						} catch (e) {
+							const message =
+								e instanceof Error ? e.message : "Invalid request";
+							const resp = jsonResponse(
+								{ success: false, error: message },
+								400,
+							);
+							logRequest(method, path, 400);
+							return resp;
+						}
+					})();
+				} else if (method === "POST" && path === "/task/mark") {
+					return (async () => {
+						try {
+							const body = await req.json();
+							const taskId = body.taskId as string;
+							const status = body.status as string;
+
+							if (!taskId) {
+								const resp = jsonResponse(
+									{ success: false, error: "Missing 'taskId' field" },
+									400,
+								);
+								logRequest(method, path, 400);
+								return resp;
+							}
+
+							if (
+								!status ||
+								!["todo", "in-progress", "complete"].includes(status)
+							) {
+								const resp = jsonResponse(
+									{
+										success: false,
+										error:
+											"Invalid 'status' - must be 'todo', 'in-progress', or 'complete'",
+									},
+									400,
+								);
+								logRequest(method, path, 400);
+								return resp;
+							}
+
+							const result = updateStructuredTaskStatus(
+								taskId,
+								status as "todo" | "in-progress" | "complete",
+							);
+
+							if (!result.success) {
+								const resp = jsonResponse(
+									{ success: false, error: result.error },
+									400,
+								);
+								logRequest(method, path, 400);
+								return resp;
+							}
+
+							const resp = jsonResponse({
+								success: true,
+								taskId,
+								status,
+								updatedAt: new Date().toISOString(),
+							});
+							logRequest(method, path, 200);
+							return resp;
+						} catch (e) {
+							const message =
+								e instanceof Error ? e.message : "Invalid request";
+							const resp = jsonResponse(
+								{ success: false, error: message },
+								400,
+							);
+							logRequest(method, path, 400);
+							return resp;
+						}
+					})();
+				} else if (method === "GET" && path === "/context") {
+					const context = loadContext();
+					if (context) {
+						// Clear context after reading
+						clearContext();
+						response = jsonResponse({
+							hasContext: true,
+							context,
+							clearedAt: new Date().toISOString(),
+						});
+					} else {
+						response = jsonResponse({
+							hasContext: false,
+							context: null,
+						});
+					}
+				} else if (method === "GET" && path === "/next-task") {
+					const state = loadState();
+					if (!state?.active) {
+						response = jsonResponse({
+							hasTask: false,
+							complete: true,
+							reason: "No active loop",
+						});
+					} else if (state.structuredTasksFile) {
+						const task = getNextStructuredTask(state.milestoneFilter || null);
+						const allComplete = allStructuredTasksComplete(
+							state.milestoneFilter || null,
+						);
+						if (allComplete) {
+							response = jsonResponse({
+								hasTask: false,
+								complete: true,
+								reason: "All tasks complete",
+							});
+						} else if (task) {
+							response = jsonResponse({
+								hasTask: true,
+								complete: false,
+								task,
+							});
+						} else {
+							response = jsonResponse({
+								hasTask: false,
+								complete: false,
+								reason: "No available tasks (dependencies not met)",
+							});
+						}
+					} else {
+						response = jsonResponse({
+							hasTask: false,
+							complete: false,
+							reason: "Not in structured tasks mode",
+						});
+					}
 				} else if (method === "POST" && path === "/context") {
 					return (async () => {
 						try {
@@ -1659,11 +2082,16 @@ function cmdServe(flags: Record<string, string | boolean>): void {
 		console.log(`   Tasks file: ${structuredTasksFile}`);
 	}
 	console.log(`\n   Endpoints:`);
-	console.log(`   GET  /status   - Current loop state`);
-	console.log(`   GET  /history  - Iteration history`);
-	console.log(`   GET  /tasks    - Task list and summary`);
-	console.log(`   POST /context  - Add context (body: {"text": "..."})`);
-	console.log(`   POST /stop     - Stop active loop`);
+	console.log(`   GET  /status            - Current loop state`);
+	console.log(`   GET  /history           - Iteration history`);
+	console.log(`   GET  /tasks             - Task list and summary`);
+	console.log(`   GET  /next-task         - Get next available task`);
+	console.log(`   GET  /context           - Get and clear pending context`);
+	console.log(`   POST /start             - Start a new loop`);
+	console.log(`   POST /iteration/complete - Record iteration result`);
+	console.log(`   POST /task/mark         - Mark task status`);
+	console.log(`   POST /context           - Add context`);
+	console.log(`   POST /stop              - Stop active loop`);
 	console.log(`\n   Press Ctrl+C to stop\n`);
 }
 
@@ -1683,11 +2111,16 @@ Options:
   -t, --tasks-file <path> Specify structured tasks file
 
 Endpoints:
-  GET  /status   - Current loop state as JSON
-  GET  /history  - Iteration history as JSON
-  GET  /tasks    - Task list and summary as JSON
-  POST /context  - Add context (body: {"text": "..."})
-  POST /stop     - Stop active loop
+  GET  /status            - Current loop state as JSON
+  GET  /history           - Iteration history as JSON
+  GET  /tasks             - Task list and summary as JSON
+  GET  /next-task         - Get next available task or completion signal
+  GET  /context           - Get pending context and clear it
+  POST /start             - Start a new loop (body: {promptFile?, prompt?, tasksFile?, milestone?})
+  POST /iteration/complete - Record iteration result (body: {filesModified, errors, notes?, completionDetected?})
+  POST /task/mark         - Mark task status (body: {taskId, status})
+  POST /context           - Add context (body: {"text": "..."})
+  POST /stop              - Stop active loop
 
 Examples:
   chief-wiggum serve
