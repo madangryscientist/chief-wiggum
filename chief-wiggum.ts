@@ -1869,6 +1869,19 @@ function cmdServe(flags: Record<string, string | boolean>): void {
 								task: task || undefined,
 							});
 
+							// Verbose logging
+							console.log(`\n${"═".repeat(60)}`);
+							console.log(`🚀 LOOP STARTED: ${loopId}`);
+							console.log(`${"═".repeat(60)}`);
+							console.log(`   Iteration: 1`);
+							if (task) {
+								console.log(`   First Task: ${task.id} - ${task.title}`);
+							}
+							if (milestone) {
+								console.log(`   Milestone: ${milestone}`);
+							}
+							console.log(`${"─".repeat(60)}\n`);
+
 							const resp = jsonResponse({
 								success: true,
 								loopId,
@@ -1933,6 +1946,25 @@ function cmdServe(flags: Record<string, string | boolean>): void {
 								iteration: state.iteration,
 								result: iterationRecord,
 							});
+
+							// Verbose logging
+							const durationSec = Math.round(iterationRecord.durationMs / 1000);
+							console.log(`\n${"─".repeat(60)}`);
+							console.log(
+								`✅ ITERATION ${state.iteration} COMPLETE (${durationSec}s)`,
+							);
+							if (filesModified.length > 0) {
+								console.log(`   Files: ${filesModified.join(", ")}`);
+							}
+							if (errors.length > 0) {
+								console.log(`   ⚠️  Errors: ${errors.join(", ")}`);
+							}
+							if (notes) {
+								console.log(`   Notes: ${notes}`);
+							}
+							if (completionDetected) {
+								console.log(`   🎯 Completion detected`);
+							}
 
 							// Determine next action
 							let next: "continue" | "complete" | "stop" = "continue";
@@ -2011,6 +2043,26 @@ function cmdServe(flags: Record<string, string | boolean>): void {
 									iteration: state.iteration,
 									loopId: state.loopId || "",
 								});
+								console.log(`\n🔄 ITERATION ${state.iteration} STARTED`);
+								if (task) {
+									console.log(`   Task: ${task.id} - ${task.title}`);
+								}
+								console.log(`${"─".repeat(60)}\n`);
+							} else if (next === "complete") {
+								console.log(`\n${"═".repeat(60)}`);
+								console.log(`🎉 LOOP COMPLETE`);
+								console.log(
+									`   Total iterations: ${history.iterations.length}`,
+								);
+								console.log(
+									`   Total time: ${Math.round(history.totalDurationMs / 1000)}s`,
+								);
+								console.log(`${"═".repeat(60)}\n`);
+							} else if (next === "stop") {
+								console.log(`\n${"═".repeat(60)}`);
+								console.log(`🛑 LOOP STOPPED`);
+								console.log(`   Stopped at iteration: ${state.iteration}`);
+								console.log(`${"═".repeat(60)}\n`);
 							}
 
 							const resp = jsonResponse({
@@ -2092,6 +2144,17 @@ function cmdServe(flags: Record<string, string | boolean>): void {
 									status,
 								});
 							}
+
+							// Verbose logging
+							const icon =
+								status === "complete"
+									? "✅"
+									: status === "in-progress"
+										? "🔄"
+										: "⏸️";
+							console.log(
+								`   ${icon} Task ${taskId}: ${status}${updatedTask ? ` - ${updatedTask.title}` : ""}`,
+							);
 
 							const resp = jsonResponse({
 								success: true,
@@ -2202,6 +2265,12 @@ function cmdServe(flags: Record<string, string | boolean>): void {
 								type: "context.received",
 								text,
 							});
+
+							// Verbose logging
+							console.log(`\n📝 CONTEXT INJECTED`);
+							console.log(
+								`   ${text.substring(0, 100)}${text.length > 100 ? "..." : ""}`,
+							);
 
 							const resp = jsonResponse({ success: true, action: "added" });
 							logRequest(method, path, 200);
