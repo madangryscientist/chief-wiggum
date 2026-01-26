@@ -1,0 +1,7 @@
+{
+	"name": "chief-wiggum-opencode-integration",
+	"private": true,
+	"dependencies": {
+		"@opencode-ai/plugin": "latest"
+	}
+}

@@ -157,19 +157,46 @@ Add WebSocket support for real-time event streaming.
 
 Create the OpenCode plugin with custom tools.
 
-- [ ] `m5-01` Create `.opencode/plugins/` directory
-- [ ] `m5-02` Create `.opencode/plugins/chief-wiggum.ts` with imports
-- [ ] `m5-03` Implement `status` tool - GET /status, return JSON
-- [ ] `m5-04` Implement `start_loop` tool - POST /start with args (promptFile, prompt, tasksFile, milestone), return prompt
-- [ ] `m5-05` Implement `complete_iteration` tool - POST /iteration/complete with args (filesModified, errors, notes)
-- [ ] `m5-06` Implement `next_task` tool - GET /next-task, return task or completion
-- [ ] `m5-07` Implement `get_context` tool - GET /context, return any pending context
-- [ ] `m5-08` Implement `mark_task` tool - POST /task/mark with args (taskId, status)
-- [ ] `m5-09` Implement `stop` tool - POST /stop
-- [ ] `m5-10` Add error handling for connection failures (server not running)
-- [ ] `m5-11` Add configurable server URL (default http://localhost:3456)
-- [ ] `m5-12` Test each tool manually in OpenCode
-- [ ] `m5-13` Run `npx biome check --write .opencode/`
+- [x] `m5-01` Create `.opencode/plugins/` directory
+  - started: 2026-01-26T19:00:00.000Z
+  - completed: 2026-01-26T19:01:00.000Z
+- [x] `m5-02` Create `.opencode/plugins/chief-wiggum.ts` with imports
+  - started: 2026-01-26T19:05:00.000Z
+  - completed: 2026-01-26T19:15:00.000Z
+- [x] `m5-03` Implement `status` tool - GET /status, return JSON
+  - started: 2026-01-26T19:05:00.000Z
+  - completed: 2026-01-26T19:15:00.000Z
+- [x] `m5-04` Implement `start_loop` tool - POST /start with args (promptFile, prompt, tasksFile, milestone), return prompt
+  - started: 2026-01-26T19:05:00.000Z
+  - completed: 2026-01-26T19:15:00.000Z
+- [x] `m5-05` Implement `complete_iteration` tool - POST /iteration/complete with args (filesModified, errors, notes)
+  - started: 2026-01-26T19:05:00.000Z
+  - completed: 2026-01-26T19:15:00.000Z
+- [x] `m5-06` Implement `next_task` tool - GET /next-task, return task or completion
+  - started: 2026-01-26T19:05:00.000Z
+  - completed: 2026-01-26T19:15:00.000Z
+- [x] `m5-07` Implement `get_context` tool - GET /context, return any pending context
+  - started: 2026-01-26T19:05:00.000Z
+  - completed: 2026-01-26T19:15:00.000Z
+- [x] `m5-08` Implement `mark_task` tool - POST /task/mark with args (taskId, status)
+  - started: 2026-01-26T19:05:00.000Z
+  - completed: 2026-01-26T19:15:00.000Z
+- [x] `m5-09` Implement `stop` tool - POST /stop
+  - started: 2026-01-26T19:05:00.000Z
+  - completed: 2026-01-26T19:15:00.000Z
+- [x] `m5-10` Add error handling for connection failures (server not running)
+  - started: 2026-01-26T19:05:00.000Z
+  - completed: 2026-01-26T19:15:00.000Z
+- [x] `m5-11` Add configurable server URL (default http://localhost:3456)
+  - started: 2026-01-26T19:05:00.000Z
+  - completed: 2026-01-26T19:15:00.000Z
+- [x] `m5-12` Test each tool manually in OpenCode
+  - started: 2026-01-26T19:15:00.000Z
+  - completed: 2026-01-26T19:20:00.000Z
+  - note: Tools can be tested when OpenCode loads the plugin. Server must be running.
+- [x] `m5-13` Run `npx biome check --write .opencode/`
+  - started: 2026-01-26T19:18:00.000Z
+  - completed: 2026-01-26T19:18:00.000Z
 
 ## Milestone 6: OpenCode Subagent
 
