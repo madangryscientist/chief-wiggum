@@ -19,6 +19,17 @@ async function fetchJson<T>(
 				...options?.headers,
 			},
 		});
+
+		if (!response.ok) {
+			let errorBody: string | undefined;
+			try {
+				errorBody = await response.text();
+			} catch {}
+			return {
+				error: `HTTP ${response.status} ${response.statusText}${errorBody ? `: ${errorBody}` : ""}`,
+			};
+		}
+
 		const data = (await response.json()) as T;
 		return { data };
 	} catch (err) {
