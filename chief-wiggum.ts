@@ -1912,17 +1912,65 @@ async function cmdLogs(
 			return;
 		}
 
+		// Calculate stats from ALL logs (not just the ones being archived)
 		let totalSize = 0;
+		let totalIterations = 0;
+		const allToolsUsed: Record<string, number> = {};
+
+		for (const log of summaries) {
+			totalSize += log.sizeBytes;
+			totalIterations += log.iterations;
+			for (const [tool, count] of Object.entries(log.toolsUsed)) {
+				allToolsUsed[tool] = (allToolsUsed[tool] || 0) + count;
+			}
+		}
+
+		// Move old logs to archive
+		let archivedSize = 0;
 		for (const log of toArchive) {
 			const src = log.path;
 			const dest = join(archiveDir, log.filename);
 			copyFileSync(src, dest);
 			unlinkSync(src);
-			totalSize += log.sizeBytes;
+			archivedSize += log.sizeBytes;
 		}
 
-		console.log(`✅ Archived ${toArchive.length} log files (${formatBytes(totalSize)})`);
+		// Generate summary file from ALL logs
+		const archiveTimestamp = new Date().toISOString().replace(/[:.]/g, "-").slice(0, 19);
+		const summaryPath = join(archiveDir, `archive-summary-${archiveTimestamp}.md`);
+
+		const topTools = Object.entries(allToolsUsed)
+			.sort((a, b) => b[1] - a[1])
+			.slice(0, 10)
+			.map(([name, count]) => `- ${name}: ${count}`)
+			.join("\n");
+
+		const milestones = [...new Set(summaries.map((l) => l.milestone))];
+
+		const summaryContent = `# Archive Summary
+
+**Archived:** ${new Date().toLocaleString()}
+**Files:** ${summaries.length}
+**Total Size:** ${formatBytes(totalSize)}
+**Total Iterations:** ${totalIterations}
+**Milestones:** ${milestones.join(", ")}
+
+## Top Tools Used
+
+${topTools || "No tool usage recorded"}
+
+## All Log Files
+
+| File | Milestone | Iterations | Size |
+|------|-----------|------------|------|
+${summaries.map((log) => `| ${log.filename} | ${log.milestone} | ${log.iterations} | ${formatBytes(log.sizeBytes)} |`).join("\n")}
+`;
+
+		writeFileSync(summaryPath, summaryContent);
+
+		console.log(`✅ Archived ${toArchive.length} log files (${formatBytes(archivedSize)})`);
 		console.log(`   Location: ${archiveDir}`);
+		console.log(`   Summary:  ${summaryPath.split("/").pop()} (all ${summaries.length} logs)`);
 		return;
 	}
 
