@@ -1,38 +1,10 @@
 import { describe, expect, test } from "bun:test";
-
-// Import functions to test - we'll need to export them from chief-wiggum.ts
-// For now, we'll inline the implementations to test
-
-// biome-ignore lint/suspicious/noControlCharactersInRegex: ANSI escape codes require control characters
-const ANSI_REGEX = /\x1B\[[0-9;]*m/g;
-
-function stripAnsi(input: string): string {
-	return input.replace(ANSI_REGEX, "");
-}
-
-function formatDuration(ms: number): string {
-	const totalSeconds = Math.max(0, Math.floor(ms / 1000));
-	const hours = Math.floor(totalSeconds / 3600);
-	const minutes = Math.floor((totalSeconds % 3600) / 60);
-	const seconds = totalSeconds % 60;
-	if (hours > 0)
-		return `${hours}:${String(minutes).padStart(2, "0")}:${String(seconds).padStart(2, "0")}`;
-	return `${minutes}:${String(seconds).padStart(2, "0")}`;
-}
-
-function formatDurationLong(ms: number): string {
-	const totalSeconds = Math.max(0, Math.floor(ms / 1000));
-	const hours = Math.floor(totalSeconds / 3600);
-	const minutes = Math.floor((totalSeconds % 3600) / 60);
-	const seconds = totalSeconds % 60;
-	if (hours > 0) return `${hours}h ${minutes}m ${seconds}s`;
-	if (minutes > 0) return `${minutes}m ${seconds}s`;
-	return `${seconds}s`;
-}
-
-function escapeRegex(str: string): string {
-	return str.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-}
+import {
+	escapeRegex,
+	formatDuration,
+	formatDurationLong,
+	stripAnsi,
+} from "../utils";
 
 describe("stripAnsi", () => {
 	test("removes ANSI color codes", () => {

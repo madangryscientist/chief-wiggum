@@ -16,15 +16,12 @@ import {
 	writeFileSync,
 } from "node:fs";
 import { join } from "node:path";
-import { $ } from "bun";
 
 const VERSION = "2.0.0";
 
 // ============================================================================
 // Types
 // ============================================================================
-
-type AgentType = "opencode" | "claude-code" | "codex";
 
 interface StructuredTask {
 	id: string;
@@ -81,52 +78,35 @@ interface RalphState {
 	taskPromise: string;
 	prompt: string;
 	startedAt: string;
-	model: string;
-	agent: AgentType;
 	workspaceRoot?: string;
 	structuredTasksFile?: string | null;
 	milestoneFilter?: string | null;
-	logFile?: string | null;
+	loopId?: string | null;
 }
 
-interface AgentConfig {
-	type: AgentType;
-	command: string;
-	buildArgs: (
-		prompt: string,
-		model: string,
-		options?: { allowAllPermissions?: boolean },
-	) => string[];
-	buildEnv: (options: {
-		filterPlugins?: boolean;
-		allowAllPermissions?: boolean;
-	}) => NodeJS.ProcessEnv;
-	parseToolOutput: (line: string) => string | null;
-	configName: string;
-}
+// ============================================================================
+// WebSocket Event Types
+// ============================================================================
 
-interface RunOptions {
-	prompt: string;
-	promptFile: string;
-	model: string;
-	agent: AgentType;
-	iterations: number;
-	tasksFile: string | null;
-	milestone: string | null;
-	workspace: string;
-	repo: string | null;
-	branch: string | null;
-	done: string;
-	next: string;
-	timeout: number;
-	force: boolean;
-	verbose: boolean;
-	quiet: boolean;
-	noCommit: boolean;
-	interactive: boolean;
-	noPlugins: boolean;
-	log: boolean;
-}
+type ServerEvent =
+	| {
+			type: "loop.started";
+			loopId: string;
+			prompt: string;
+			task?: StructuredTask;
+	  }
+	| { type: "iteration.started"; iteration: number; loopId: string }
+	| { type: "iteration.completed"; iteration: number; result: IterationHistory }
+	| {
+			type: "task.updated";
+			task: StructuredTask;
+			taskId: string;
+			status: string;
+	  }
+	| { type: "context.received"; text: string }
+	| { type: "loop.completed"; history: RalphHistory; loopId: string }
+	| { type: "loop.stopped"; reason: string; loopId: string; iteration: number }
+	| { type: "error"; message: string };
 
 // ============================================================================
 // Globals
@@ -134,8 +114,60 @@ interface RunOptions {
 
 let workspaceRoot = process.cwd();
 let structuredTasksFile: string | null = null;
-let milestoneFilter: string | null = null;
-let logFilePath: string | null = null;
+
+// ============================================================================
+// WebSocket Manager
+// ============================================================================
+
+import type { ServerWebSocket } from "bun";
+
+type WSData = { id: string };
+
+class WebSocketManager {
+	private clients: Map<string, ServerWebSocket<WSData>> = new Map();
+	private clientIdCounter = 0;
+
+	generateClientId(): string {
+		return `ws-${Date.now()}-${++this.clientIdCounter}`;
+	}
+
+	addClient(ws: ServerWebSocket<WSData>): void {
+		this.clients.set(ws.data.id, ws);
+		console.log(
+			`[WS] Client connected: ${ws.data.id} (${this.clients.size} total)`,
+		);
+	}
+
+	removeClient(ws: ServerWebSocket<WSData>): void {
+		this.clients.delete(ws.data.id);
+		console.log(
+			`[WS] Client disconnected: ${ws.data.id} (${this.clients.size} total)`,
+		);
+	}
+
+	broadcast(event: ServerEvent): void {
+		const message = JSON.stringify(event);
+		const timestamp = new Date().toISOString();
+		console.log(
+			`[WS] Broadcasting ${event.type} to ${this.clients.size} client(s)`,
+		);
+
+		for (const [id, client] of this.clients) {
+			try {
+				client.send(message);
+			} catch (err) {
+				console.error(`[WS] Failed to send to ${id}:`, err);
+				this.clients.delete(id);
+			}
+		}
+	}
+
+	getClientCount(): number {
+		return this.clients.size;
+	}
+}
+
+const wsManager = new WebSocketManager();
 
 // ============================================================================
 // Path helpers
@@ -148,73 +180,6 @@ const getHistoryPath = () => join(getStateDir(), "ralph-history.json");
 const getTasksPath = () => join(getStateDir(), "ralph-tasks.md");
 const getSuggestedTasksPath = () => join(getStateDir(), "suggested-tasks.md");
 const getLogDir = () => join(getStateDir(), "logs");
-
-// ============================================================================
-// Agent configurations
-// ============================================================================
-
-const AGENTS: Record<AgentType, AgentConfig> = {
-	opencode: {
-		type: "opencode",
-		command: "opencode",
-		buildArgs: (promptText, modelName) => {
-			const args = ["run"];
-			if (modelName) args.push("-m", modelName);
-			args.push(promptText);
-			return args;
-		},
-		buildEnv: (options) => {
-			const env = { ...process.env };
-			if (options.filterPlugins || options.allowAllPermissions) {
-				env.OPENCODE_CONFIG = ensureRalphConfig(options);
-			}
-			return env;
-		},
-		parseToolOutput: (line) => {
-			const match = stripAnsi(line).match(/^\|\s{2}([A-Za-z0-9_-]+)/);
-			return match ? match[1] : null;
-		},
-		configName: "OpenCode",
-	},
-	"claude-code": {
-		type: "claude-code",
-		command: "claude",
-		buildArgs: (promptText, modelName, options) => {
-			const args = ["-p", promptText];
-			if (modelName) args.push("--model", modelName);
-			if (options?.allowAllPermissions)
-				args.push("--dangerously-skip-permissions");
-			return args;
-		},
-		buildEnv: () => ({ ...process.env }),
-		parseToolOutput: (line) => {
-			const match = stripAnsi(line).match(
-				/(?:Using|Called|Tool:)\s+([A-Za-z0-9_-]+)/i,
-			);
-			return match ? match[1] : null;
-		},
-		configName: "Claude Code",
-	},
-	codex: {
-		type: "codex",
-		command: "codex",
-		buildArgs: (promptText, modelName, options) => {
-			const args = ["exec"];
-			if (modelName) args.push("--model", modelName);
-			if (options?.allowAllPermissions) args.push("--full-auto");
-			args.push(promptText);
-			return args;
-		},
-		buildEnv: () => ({ ...process.env }),
-		parseToolOutput: (line) => {
-			const match = stripAnsi(line).match(
-				/(?:Tool:|Using|Calling|Running)\s+([A-Za-z0-9_-]+)/i,
-			);
-			return match ? match[1] : null;
-		},
-		configName: "Codex",
-	},
-};
 
 // ============================================================================
 // CLI Parser
@@ -233,40 +198,29 @@ const FLAG_DEFS: Record<string, FlagDef> = {
 	"--help": { key: "help", hasValue: false },
 	"-V": { key: "version", hasValue: false },
 	"--version": { key: "version", hasValue: false },
-	"-f": { key: "prompt", hasValue: true },
-	"--prompt": { key: "prompt", hasValue: true },
-	"-n": { key: "iterations", hasValue: true, default: "0" },
-	"--iterations": { key: "iterations", hasValue: true, default: "0" },
-	"-m": { key: "model", hasValue: true },
-	"--model": { key: "model", hasValue: true },
-	"-a": { key: "agent", hasValue: true },
-	"--agent": { key: "agent", hasValue: true },
+	"--count": { key: "count", hasValue: true, default: "5" },
+	"--lines": { key: "lines", hasValue: true, default: "1000" },
 	"-t": { key: "tasksFile", hasValue: true },
 	"--tasks-file": { key: "tasksFile", hasValue: true },
 	"-M": { key: "milestone", hasValue: true },
 	"--milestone": { key: "milestone", hasValue: true },
 	"-w": { key: "workspace", hasValue: true },
 	"--workspace": { key: "workspace", hasValue: true },
-	"--repo": { key: "repo", hasValue: true },
-	"-b": { key: "branch", hasValue: true },
-	"--branch": { key: "branch", hasValue: true },
-	"--done": { key: "done", hasValue: true },
-	"--next": { key: "next", hasValue: true },
-	"--timeout": { key: "timeout", hasValue: true, default: "30" },
-	"--force": { key: "force", hasValue: false },
-	"-v": { key: "verbose", hasValue: false },
-	"--verbose": { key: "verbose", hasValue: false },
-	"-q": { key: "quiet", hasValue: false },
-	"--quiet": { key: "quiet", hasValue: false },
-	"--no-commit": { key: "noCommit", hasValue: false },
-	"-i": { key: "interactive", hasValue: false },
-	"--interactive": { key: "interactive", hasValue: false },
-	"--no-plugins": { key: "noPlugins", hasValue: false },
-	"--log": { key: "log", hasValue: false },
 	"--clear": { key: "clear", hasValue: false },
+	"--json": { key: "json", hasValue: false },
+	"-p": { key: "port", hasValue: true, default: "3456" },
+	"--port": { key: "port", hasValue: true, default: "3456" },
 };
 
-const COMMANDS = ["run", "status", "context", "tasks"];
+const COMMANDS = [
+	"status",
+	"context",
+	"tasks",
+	"logs",
+	"summary",
+	"stop",
+	"serve",
+];
 
 function parseArgs(argv: string[]): ParsedArgs {
 	const result: ParsedArgs = { command: "", args: [], flags: {} };
@@ -301,64 +255,34 @@ function parseArgs(argv: string[]): ParsedArgs {
 // ============================================================================
 
 const HELP_MAIN = `
-Chief Wiggum v${VERSION} - Iterative AI development with Ralph loops
+Chief Wiggum v${VERSION} - State manager for iterative AI development
 
 Usage:
   chief-wiggum [command] [options]
 
 Commands:
-  run              Start the Ralph loop (default)
   status           Show loop status and history  
   context <text>   Add context for next iteration
   tasks            List/manage tasks
+  logs             Print recent log output / archive logs
+  summary          Generate summaries (logs, suggested tasks)
+  stop             Stop an active loop
+  serve            Start HTTP server for state management
+
+Global Options:
+  --json           Output as JSON (for programmatic use)
 
 Run 'chief-wiggum <command> --help' for command-specific help.
 
 Examples:
-  chief-wiggum run -f prompt.md -t docs/tasks.md -M M2b
   chief-wiggum status
+  chief-wiggum status --json
   chief-wiggum context "focus on the auth module"
-  chief-wiggum tasks add "fix the login bug"
-`;
-
-const HELP_RUN = `
-chief-wiggum run - Start the Ralph loop
-
-Usage:
-  chief-wiggum run [options] [prompt]
-  chief-wiggum -f <file> [options]
-
-Core Options:
-  -f, --prompt <file>     Prompt file path
-  -n, --iterations <n>    Max iterations (0=unlimited, default: 0)
-  -m, --model <name>      Model to use (default: anthropic/claude-sonnet-4-5)
-  -a, --agent <type>      Agent: opencode (default), claude-code, codex
-
-Tasks:
-  -t, --tasks-file <path> Structured tasks file (e.g., docs/tasks.md)  
-  -M, --milestone <name>  Filter by milestone (e.g., M2b)
-  --done <phrase>         Completion promise (default: COMPLETE)
-  --next <phrase>         Task promise (default: READY_FOR_NEXT_TASK)
-
-Workspace:
-  -w, --workspace <dir>   Working directory (default: current)
-  --repo <path>           Git repo for worktree creation
-  -b, --branch <name>     Branch name for worktree
-
-Behavior:
-  --timeout <mins>        Inactivity timeout (default: 30, 0=disable)
-  --force                 Clear stale state and start fresh
-  -v, --verbose           Verbose tool output
-  -q, --quiet             Buffer output (no streaming)
-  --no-commit             Disable auto-commit after iterations
-  -i, --interactive       Require permission prompts (default: auto-approve)
-  --no-plugins            Disable non-auth plugins (opencode only)
-  --log                   Log output to .ralph/logs/
-
-Examples:
-  chief-wiggum run -f prompt.md -t docs/tasks.md -M M2b -n 50
-  chief-wiggum run "Fix the auth bug" --timeout 15
-  chief-wiggum run -f prompt.md --force --log
+  chief-wiggum tasks --json
+  chief-wiggum logs
+  chief-wiggum summary logs
+  chief-wiggum stop
+  chief-wiggum serve --port 3456
 `;
 
 const HELP_STATUS = `
@@ -369,9 +293,11 @@ Usage:
 
 Options:
   -w, --workspace <dir>   Check status in different directory
+  --json                  Output as JSON
 
 Examples:
   chief-wiggum status
+  chief-wiggum status --json
   chief-wiggum status -w ~/projects/my-app
 `;
 
@@ -381,13 +307,16 @@ chief-wiggum context - Add context for next Ralph iteration
 Usage:
   chief-wiggum context <text>    Add context text
   chief-wiggum context --clear   Clear pending context
+  chief-wiggum context --json    Get current context as JSON (no text arg)
 
 Options:
   -w, --workspace <dir>   Target different directory
+  --json                  Output as JSON
 
 Examples:
   chief-wiggum context "Focus on the auth module first"
   chief-wiggum context --clear
+  chief-wiggum context --json
 `;
 
 const HELP_TASKS = `
@@ -401,65 +330,67 @@ Usage:
 Options:
   -w, --workspace <dir>   Target different directory
   -t, --tasks-file <path> Specify tasks file
+  --json                  Output as JSON
 
 Examples:
   chief-wiggum tasks
+  chief-wiggum tasks --json
   chief-wiggum tasks add "implement user login"
   chief-wiggum tasks rm 3
+`;
+
+const HELP_LOGS = `
+chief-wiggum logs - Print recent log output and manage log files
+
+Usage:
+  chief-wiggum logs              Print last 1000 lines of current log
+  chief-wiggum logs archive      Archive old logs to .ralph/logs/archive/
+
+Options:
+  -w, --workspace <dir>   Target different directory
+  -n, --lines <n>         Number of lines to show (default: 1000)
+
+Examples:
+  chief-wiggum logs
+  chief-wiggum logs -n 500
+  chief-wiggum logs archive
+`;
+
+const HELP_SUMMARY = `
+chief-wiggum summary - Generate summaries
+
+Usage:
+  chief-wiggum summary logs      Generate summary of all logs (includes archived)
+  chief-wiggum summary suggest   Show suggested tasks from Ralph loop
+
+Options:
+  -w, --workspace <dir>   Target different directory
+
+Examples:
+  chief-wiggum summary logs
+  chief-wiggum summary suggest
+`;
+
+const HELP_STOP = `
+chief-wiggum stop - Stop an active Ralph loop
+
+Usage:
+  chief-wiggum stop [options]
+
+Options:
+  -w, --workspace <dir>   Target different directory
+  --json                  Output result as JSON
+
+Examples:
+  chief-wiggum stop
+  chief-wiggum stop --json
 `;
 
 // ============================================================================
 // Utility functions
 // ============================================================================
 
-// biome-ignore lint/suspicious/noControlCharactersInRegex: ANSI escape codes require control characters
-const ANSI_REGEX = /\x1B\[[0-9;]*m/g;
-
-function stripAnsi(input: string): string {
-	return input.replace(ANSI_REGEX, "");
-}
-
-function formatDuration(ms: number): string {
-	const totalSeconds = Math.max(0, Math.floor(ms / 1000));
-	const hours = Math.floor(totalSeconds / 3600);
-	const minutes = Math.floor((totalSeconds % 3600) / 60);
-	const seconds = totalSeconds % 60;
-	if (hours > 0)
-		return `${hours}:${String(minutes).padStart(2, "0")}:${String(seconds).padStart(2, "0")}`;
-	return `${minutes}:${String(seconds).padStart(2, "0")}`;
-}
-
-function formatDurationLong(ms: number): string {
-	const totalSeconds = Math.max(0, Math.floor(ms / 1000));
-	const hours = Math.floor(totalSeconds / 3600);
-	const minutes = Math.floor((totalSeconds % 3600) / 60);
-	const seconds = totalSeconds % 60;
-	if (hours > 0) return `${hours}h ${minutes}m ${seconds}s`;
-	if (minutes > 0) return `${minutes}m ${seconds}s`;
-	return `${seconds}s`;
-}
-
-function escapeRegex(str: string): string {
-	return str.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-}
-
-async function killProcessTree(pid: number): Promise<void> {
-	if (process.platform === "darwin" || process.platform === "linux") {
-		// Use pkill to kill all processes in the process group
-		try {
-			await $`pkill -9 -P ${pid}`.quiet();
-		} catch {}
-		// Also try to kill the process directly
-		try {
-			process.kill(pid, "SIGKILL");
-		} catch {}
-	} else {
-		// Windows or other - just try SIGKILL
-		try {
-			process.kill(pid, "SIGKILL");
-		} catch {}
-	}
-}
+import { formatDurationLong } from "./utils";
 
 // ============================================================================
 // State management
@@ -627,7 +558,7 @@ function parseStructuredTasks(content: string): ParsedTasksFile {
 		}
 
 		const taskMatch = line.match(
-			/^-\s+\[([ x/])\]\s+([a-zA-Z0-9_-]+):\s*(.+)$/,
+			/^-\s+\[([ x/])\]\s+`?([a-zA-Z0-9_-]+)`?\s+(.+)$/,
 		);
 		if (taskMatch) {
 			saveCurrentTask();
@@ -732,6 +663,98 @@ function allStructuredTasksComplete(milestone: string | null): boolean {
 	return tasks.length > 0 && tasks.every((t) => t.status === "complete");
 }
 
+function updateStructuredTaskStatus(
+	taskId: string,
+	newStatus: "todo" | "in-progress" | "complete",
+): { success: boolean; error?: string } {
+	if (!structuredTasksFile) {
+		return { success: false, error: "No structured tasks file configured" };
+	}
+
+	const fullPath = join(workspaceRoot, structuredTasksFile);
+	if (!existsSync(fullPath)) {
+		return { success: false, error: "Tasks file not found" };
+	}
+
+	const content = readFileSync(fullPath, "utf-8");
+	const lines = content.split("\n");
+	const newLines: string[] = [];
+	let found = false;
+	let i = 0;
+
+	while (i < lines.length) {
+		const line = lines[i];
+		const taskMatch = line.match(
+			/^(-\s+\[)([ x/])(\]\s+`?)([a-zA-Z0-9_-]+)(`?\s+.+)$/,
+		);
+
+		if (taskMatch && taskMatch[4] === taskId) {
+			found = true;
+			const statusChar =
+				newStatus === "complete"
+					? "x"
+					: newStatus === "in-progress"
+						? "/"
+						: " ";
+			newLines.push(
+				`${taskMatch[1]}${statusChar}${taskMatch[3]}${taskMatch[4]}${taskMatch[5]}`,
+			);
+			i++;
+
+			// Scan ahead to find existing metadata lines and detect started/completed
+			let hasStarted = false;
+			let hasCompleted = false;
+			const metadataStartIndex = i;
+			let metadataEndIndex = i;
+
+			while (
+				metadataEndIndex < lines.length &&
+				lines[metadataEndIndex].match(/^\s+-\s+\w+:/)
+			) {
+				const metaLine = lines[metadataEndIndex];
+				if (metaLine.match(/^\s+-\s+started:/)) {
+					hasStarted = true;
+				}
+				if (metaLine.match(/^\s+-\s+completed:/)) {
+					hasCompleted = true;
+				}
+				metadataEndIndex++;
+			}
+
+			// Add started timestamp if marking in-progress and not already present
+			if (newStatus === "in-progress" && !hasStarted) {
+				newLines.push(`  - started: ${new Date().toISOString()}`);
+			}
+
+			// Copy existing metadata lines, skipping completed if we're re-completing
+			for (let j = metadataStartIndex; j < metadataEndIndex; j++) {
+				const metaLine = lines[j];
+				if (newStatus === "complete" && metaLine.match(/^\s+-\s+completed:/)) {
+					// Skip old completed line, we'll add a new one
+					continue;
+				}
+				newLines.push(metaLine);
+			}
+			i = metadataEndIndex;
+
+			// Add completed timestamp if marking complete
+			if (newStatus === "complete") {
+				newLines.push(`  - completed: ${new Date().toISOString()}`);
+			}
+		} else {
+			newLines.push(line);
+			i++;
+		}
+	}
+
+	if (!found) {
+		return { success: false, error: `Task not found: ${taskId}` };
+	}
+
+	writeFileSync(fullPath, newLines.join("\n"));
+	return { success: true };
+}
+
 function getStructuredTasksSummary(milestone: string | null): {
 	pending: number;
 	inProgress: number;
@@ -754,336 +777,11 @@ function getStructuredTasksSummary(milestone: string | null): {
 	return { pending, inProgress, completed, total: tasks.length };
 }
 
-function _findCurrentTask(tasks: Task[]): Task | null {
-	for (const task of tasks) {
-		if (task.status === "in-progress") return task;
-	}
-	return null;
-}
-
-function _findNextTask(tasks: Task[]): Task | null {
-	for (const task of tasks) {
-		if (task.status === "todo") return task;
-	}
-	return null;
-}
-
-function _allTasksComplete(tasks: Task[]): boolean {
-	return tasks.length > 0 && tasks.every((t) => t.status === "complete");
-}
-
-// ============================================================================
-// Config helpers
-// ============================================================================
-
-function loadPluginsFromConfig(configPath: string): string[] {
-	if (!existsSync(configPath)) return [];
-	try {
-		const raw = readFileSync(configPath, "utf-8");
-		const withoutBlock = raw.replace(/\/\*[\s\S]*?\*\//g, "");
-		const withoutLine = withoutBlock.replace(/^\s*\/\/.*$/gm, "");
-		const parsed = JSON.parse(withoutLine);
-		const plugins = parsed?.plugin;
-		return Array.isArray(plugins)
-			? plugins.filter((p) => typeof p === "string")
-			: [];
-	} catch {
-		return [];
-	}
-}
-
-function ensureRalphConfig(options: {
-	filterPlugins?: boolean;
-	allowAllPermissions?: boolean;
-}): string {
-	const stateDir = getStateDir();
-	if (!existsSync(stateDir)) mkdirSync(stateDir, { recursive: true });
-
-	const configPath = join(stateDir, "ralph-opencode.config.json");
-	const userConfigPath = join(
-		process.env.XDG_CONFIG_HOME ?? join(process.env.HOME ?? "", ".config"),
-		"opencode",
-		"opencode.json",
-	);
-	const projectConfigPath = join(process.cwd(), ".ralph", "opencode.json");
-	const legacyProjectConfigPath = join(
-		process.cwd(),
-		".opencode",
-		"opencode.json",
-	);
-
-	const config: Record<string, unknown> = {
-		$schema: "https://opencode.ai/config.json",
-	};
-
-	if (options.filterPlugins) {
-		const plugins = [
-			...loadPluginsFromConfig(userConfigPath),
-			...loadPluginsFromConfig(projectConfigPath),
-			...loadPluginsFromConfig(legacyProjectConfigPath),
-		];
-		config.plugin = Array.from(new Set(plugins)).filter((p) => /auth/i.test(p));
-	}
-
-	if (options.allowAllPermissions) {
-		config.permission = {
-			read: "allow",
-			edit: "allow",
-			glob: "allow",
-			grep: "allow",
-			list: "allow",
-			bash: "allow",
-			task: "allow",
-			webfetch: "allow",
-			websearch: "allow",
-			codesearch: "allow",
-			todowrite: "allow",
-			todoread: "allow",
-			question: "allow",
-			lsp: "allow",
-			external_directory: "allow",
-		};
-	}
-
-	writeFileSync(configPath, JSON.stringify(config, null, 2));
-	return configPath;
-}
-
-// ============================================================================
-// Worktree management
-// ============================================================================
-
-function extractWorktreeName(promptContent: string): string {
-	const match = promptContent.match(/^#\s+(.+)$/m);
-	if (!match) {
-		console.error("Error: No # heading found in prompt file.");
-		process.exit(1);
-	}
-	return match[1]
-		.toLowerCase()
-		.replace(/[^a-z0-9]+/g, "-")
-		.replace(/^-+|-+$/g, "");
-}
-
-async function branchExists(repoDir: string, branch: string): Promise<boolean> {
-	try {
-		const localResult =
-			await $`git -C ${repoDir} branch --list ${branch}`.text();
-		if (localResult.trim()) return true;
-		const remoteResult =
-			await $`git -C ${repoDir} branch -r --list origin/${branch}`.text();
-		return !!remoteResult.trim();
-	} catch {
-		return false;
-	}
-}
-
-async function getDefaultBranch(repoDir: string): Promise<string> {
-	try {
-		const result =
-			await $`git -C ${repoDir} symbolic-ref refs/remotes/origin/HEAD 2>/dev/null`.text();
-		const match = result.match(/refs\/remotes\/origin\/(.+)/);
-		if (match) return match[1].trim();
-	} catch {}
-
-	try {
-		await $`git -C ${repoDir} rev-parse --verify origin/main`.quiet();
-		return "main";
-	} catch {
-		try {
-			await $`git -C ${repoDir} rev-parse --verify origin/master`.quiet();
-			return "master";
-		} catch {
-			console.error("Error: Could not find origin/main or origin/master");
-			process.exit(1);
-		}
-	}
-	return "main";
-}
-
-async function confirm(message: string): Promise<boolean> {
-	process.stdout.write(`${message} [y/N] `);
-	const reader = Bun.stdin.stream().getReader();
-	const { value } = await reader.read();
-	reader.releaseLock();
-	const answer = new TextDecoder().decode(value).trim().toLowerCase();
-	return answer === "y" || answer === "yes";
-}
-
-async function setupWorktree(
-	repo: string,
-	promptContent: string,
-	branch: string | null,
-	promptFilePath: string,
-	tasksFilePath: string | null,
-): Promise<{
-	worktreePath: string;
-	promptFile: string;
-	tasksFile: string | null;
-}> {
-	if (!existsSync(join(repo, ".git"))) {
-		console.error(`Error: Not a git repository: ${repo}`);
-		process.exit(1);
-	}
-
-	const worktreeName = extractWorktreeName(promptContent);
-	const worktreePath = `${repo}.worktrees/${worktreeName}`;
-	const effectiveBranch = branch || worktreeName;
-
-	console.log(`\n📁 Worktree Setup`);
-	console.log(`   Name: ${worktreeName}`);
-	console.log(`   Path: ${worktreePath}`);
-	console.log(`   Branch: ${effectiveBranch}`);
-
-	if (existsSync(worktreePath)) {
-		console.log(`   Status: Using existing worktree`);
-		return {
-			worktreePath,
-			promptFile: join(worktreePath, ".ralph", "ralph-prompt.md"),
-			tasksFile: tasksFilePath,
-		};
-	}
-
-	console.log(`   Fetching from origin...`);
-	try {
-		await $`git -C ${repo} fetch origin`.quiet();
-	} catch {}
-
-	const branchAlreadyExists = await branchExists(repo, effectiveBranch);
-
-	if (branchAlreadyExists) {
-		console.log(`   Branch '${effectiveBranch}' already exists.`);
-		const confirmed = await confirm(`   Reuse existing branch?`);
-		if (!confirmed) {
-			console.error("   Aborted. Specify a different branch with -b");
-			process.exit(1);
-		}
-		await $`git -C ${repo} worktree add ${worktreePath} ${effectiveBranch}`;
-	} else {
-		const defaultBranch = await getDefaultBranch(repo);
-		console.log(`   Creating new branch from origin/${defaultBranch}...`);
-		const worktreeParent = join(`${repo}.worktrees`);
-		if (!existsSync(worktreeParent))
-			mkdirSync(worktreeParent, { recursive: true });
-		await $`git -C ${repo} worktree add -b ${effectiveBranch} ${worktreePath} origin/${defaultBranch}`;
-	}
-
-	const ralphDir = join(worktreePath, ".ralph");
-	if (!existsSync(ralphDir)) mkdirSync(ralphDir, { recursive: true });
-
-	const targetPromptPath = join(ralphDir, "ralph-prompt.md");
-	copyFileSync(promptFilePath, targetPromptPath);
-	console.log(`   Copied prompt to .ralph/ralph-prompt.md`);
-
-	let finalTasksFile: string | null = null;
-	if (tasksFilePath && existsSync(tasksFilePath)) {
-		const targetTasksPath = join(worktreePath, tasksFilePath);
-		const targetTasksDir = join(
-			worktreePath,
-			...tasksFilePath.split("/").slice(0, -1),
-		);
-		if (targetTasksDir && !existsSync(targetTasksDir))
-			mkdirSync(targetTasksDir, { recursive: true });
-		copyFileSync(tasksFilePath, targetTasksPath);
-		console.log(`   Copied tasks to ${tasksFilePath}`);
-		finalTasksFile = tasksFilePath;
-	}
-
-	console.log(`   ✅ Worktree ready`);
-
-	return {
-		worktreePath,
-		promptFile: ".ralph/ralph-prompt.md",
-		tasksFile: finalTasksFile,
-	};
-}
-
-// ============================================================================
-// Logging
-// ============================================================================
-
-function initLogFile(): void {
-	if (!logFilePath) return;
-
-	const logDir = getLogDir();
-	if (!existsSync(logDir)) mkdirSync(logDir, { recursive: true });
-
-	const timestamp = new Date().toISOString().replace(/[:.]/g, "-").slice(0, 19);
-	const milestone = milestoneFilter || "all";
-	logFilePath = join(logDir, `${milestone}-${timestamp}.log`);
-
-	writeFileSync(
-		logFilePath,
-		`==========================================
-Ralph Wiggum Session Log
-==========================================
-Started:      ${new Date().toLocaleString()}
-Milestone:    ${milestoneFilter || "ALL"}
-Working Dir:  ${workspaceRoot}
-Tasks File:   ${structuredTasksFile || "N/A"}
-==========================================
-
-`,
-	);
-}
-
-// ============================================================================
-// Suggested tasks
-// ============================================================================
-
-function parseSuggestedTasks(
-	output: string,
-): Array<{ task: string; milestone: string | null }> {
-	const suggestions: Array<{ task: string; milestone: string | null }> = [];
-	const regex =
-		/<suggest-task(?:\s+milestone="([^"]*)")?\s*>([\s\S]*?)<\/suggest-task>/g;
-	let match: RegExpExecArray | null = regex.exec(output);
-	while (match !== null) {
-		const milestone = match[1] || null;
-		const task = match[2].trim();
-		if (task) suggestions.push({ task, milestone });
-		match = regex.exec(output);
-	}
-	return suggestions;
-}
-
-function appendSuggestedTasks(
-	suggestions: Array<{ task: string; milestone: string | null }>,
-	iteration: number,
-): void {
-	if (suggestions.length === 0) return;
-
-	const suggestedPath = getSuggestedTasksPath();
-	const timestamp = new Date().toISOString();
-
-	let content = "";
-	if (existsSync(suggestedPath)) {
-		content = readFileSync(suggestedPath, "utf-8");
-	} else {
-		content =
-			"# Suggested Tasks\n\nTasks suggested by the Ralph loop agent for review.\n\n";
-	}
-
-	content += `\n## From Iteration ${iteration} (${timestamp})\n\n`;
-	for (const { task, milestone } of suggestions) {
-		if (milestone) {
-			content += `- [ ] ${task}\n  - suggested-milestone: ${milestone}\n`;
-		} else {
-			content += `- [ ] ${task}\n`;
-		}
-	}
-
-	writeFileSync(suggestedPath, content);
-	console.log(
-		`📝 ${suggestions.length} task suggestion(s) written to .ralph/suggested-tasks.md`,
-	);
-}
-
 // ============================================================================
 // Prompt building
 // ============================================================================
 
-function buildPrompt(state: RalphState, _agent: AgentConfig): string {
+function buildPrompt(state: RalphState): string {
 	const context = loadContext();
 	const contextSection = context
 		? `
@@ -1230,283 +928,6 @@ Now, work on the task. Good luck!
 }
 
 // ============================================================================
-// Output streaming
-// ============================================================================
-
-function formatToolSummary(
-	toolCounts: Map<string, number>,
-	maxItems = 6,
-): string {
-	if (!toolCounts.size) return "";
-	const entries = Array.from(toolCounts.entries()).sort((a, b) => b[1] - a[1]);
-	const shown = entries.slice(0, maxItems);
-	const remaining = entries.length - shown.length;
-	const parts = shown.map(([name, count]) => `${name} ${count}`);
-	if (remaining > 0) parts.push(`+${remaining} more`);
-	return parts.join(" • ");
-}
-
-async function streamProcessOutput(
-	proc: ReturnType<typeof Bun.spawn>,
-	options: {
-		compactTools: boolean;
-		toolSummaryIntervalMs: number;
-		heartbeatIntervalMs: number;
-		iterationStart: number;
-		agent: AgentConfig;
-		inactivityTimeoutMs: number;
-	},
-): Promise<{
-	stdoutText: string;
-	stderrText: string;
-	toolCounts: Map<string, number>;
-	timedOut: boolean;
-}> {
-	const toolCounts = new Map<string, number>();
-	let stdoutText = "";
-	let stderrText = "";
-	let lastPrintedAt = Date.now();
-	let lastActivityAt = Date.now();
-	let lastToolSummaryAt = 0;
-	let timedOut = false;
-
-	const maybePrintToolSummary = (force = false) => {
-		if (!options.compactTools || toolCounts.size === 0) return;
-		const now = Date.now();
-		if (!force && now - lastToolSummaryAt < options.toolSummaryIntervalMs)
-			return;
-		const summary = formatToolSummary(toolCounts);
-		if (summary) {
-			console.log(`| Tools    ${summary}`);
-			lastPrintedAt = Date.now();
-			lastToolSummaryAt = Date.now();
-		}
-	};
-
-	const handleLine = (line: string, isError: boolean) => {
-		lastActivityAt = Date.now();
-		const tool = options.agent.parseToolOutput(line);
-		if (tool) {
-			toolCounts.set(tool, (toolCounts.get(tool) ?? 0) + 1);
-			if (options.compactTools) {
-				maybePrintToolSummary();
-				return;
-			}
-		}
-		if (line.length === 0) {
-			console.log("");
-			lastPrintedAt = Date.now();
-			return;
-		}
-		if (isError) console.error(line);
-		else console.log(line);
-		lastPrintedAt = Date.now();
-	};
-
-	const streamText = async (
-		stream: ReadableStream<Uint8Array> | null,
-		onText: (chunk: string) => void,
-		isError: boolean,
-		shouldExit: () => boolean,
-	) => {
-		if (!stream) return;
-		const reader = stream.getReader();
-		const decoder = new TextDecoder();
-		let buffer = "";
-
-		const readWithTimeout = async (): Promise<{
-			value?: Uint8Array;
-			done: boolean;
-		} | null> => {
-			// Check exit flag every 100ms while waiting for read
-			const readPromise = reader.read();
-			while (true) {
-				const result = await Promise.race([
-					readPromise,
-					new Promise<null>((resolve) => setTimeout(() => resolve(null), 100)),
-				]);
-				if (result !== null) return result;
-				if (shouldExit()) {
-					try {
-						reader.cancel();
-					} catch {}
-					return { done: true };
-				}
-			}
-		};
-
-		while (true) {
-			if (shouldExit()) {
-				try {
-					reader.cancel();
-				} catch {}
-				break;
-			}
-			const result = await readWithTimeout();
-			if (!result || result.done) break;
-			const text = decoder.decode(result.value, { stream: true });
-			if (text.length > 0) {
-				onText(text);
-				buffer += text;
-				const lines = buffer.split(/\r?\n/);
-				buffer = lines.pop() ?? "";
-				for (const line of lines) handleLine(line, isError);
-			}
-		}
-		const flushed = decoder.decode();
-		if (flushed.length > 0) {
-			onText(flushed);
-			buffer += flushed;
-		}
-		if (buffer.length > 0) handleLine(buffer, isError);
-	};
-
-	let killAttempts = 0;
-	let forceExit = false;
-
-	const heartbeatTimer = setInterval(async () => {
-		const now = Date.now();
-		const inactivityDuration = now - lastActivityAt;
-
-		if (
-			options.inactivityTimeoutMs > 0 &&
-			inactivityDuration >= options.inactivityTimeoutMs
-		) {
-			timedOut = true;
-			killAttempts++;
-
-			if (killAttempts === 1) {
-				console.log(
-					`\n⏰ INACTIVITY TIMEOUT: No output for ${formatDuration(inactivityDuration)}. Sending SIGTERM...`,
-				);
-				try {
-					proc.kill("SIGTERM");
-				} catch {}
-			} else if (killAttempts === 2) {
-				console.log(`⏰ Process didn't respond to SIGTERM. Sending SIGKILL...`);
-				try {
-					proc.kill("SIGKILL");
-				} catch {}
-			} else if (killAttempts === 3) {
-				console.log(`⏰ Killing process tree (PID: ${proc.pid})...`);
-				await killProcessTree(proc.pid);
-			} else if (killAttempts >= 4) {
-				// Force exit - the streams are stuck
-				forceExit = true;
-			}
-			return;
-		}
-
-		if (now - lastPrintedAt >= options.heartbeatIntervalMs) {
-			const elapsed = formatDuration(now - options.iterationStart);
-			const sinceActivity = formatDuration(now - lastActivityAt);
-			const timeoutIn =
-				options.inactivityTimeoutMs > 0
-					? ` · timeout in ${formatDuration(options.inactivityTimeoutMs - inactivityDuration)}`
-					: "";
-			console.log(
-				`⏳ working... elapsed ${elapsed} · last activity ${sinceActivity} ago${timeoutIn}`,
-			);
-			lastPrintedAt = now;
-		}
-	}, options.heartbeatIntervalMs);
-
-	try {
-		await Promise.all([
-			streamText(
-				proc.stdout as ReadableStream<Uint8Array> | null,
-				(chunk) => {
-					stdoutText += chunk;
-				},
-				false,
-				() => forceExit,
-			),
-			streamText(
-				proc.stderr as ReadableStream<Uint8Array> | null,
-				(chunk) => {
-					stderrText += chunk;
-				},
-				true,
-				() => forceExit,
-			),
-		]);
-	} finally {
-		clearInterval(heartbeatTimer);
-	}
-
-	// If we force-exited, make one more attempt to clean up
-	if (forceExit) {
-		console.log(`⏰ Force-exiting stream readers after timeout`);
-		await killProcessTree(proc.pid);
-	}
-
-	if (options.compactTools) maybePrintToolSummary(true);
-
-	return { stdoutText, stderrText, toolCounts, timedOut };
-}
-
-// ============================================================================
-// File snapshot for change detection
-// ============================================================================
-
-interface FileSnapshot {
-	files: Map<string, string>;
-}
-
-async function captureFileSnapshot(): Promise<FileSnapshot> {
-	const files = new Map<string, string>();
-	try {
-		const status = await $`git status --porcelain`.text();
-		const modifiedFiles: string[] = [];
-		for (const line of status.split("\n")) {
-			if (line.trim()) modifiedFiles.push(line.substring(3).trim());
-		}
-		for (const file of modifiedFiles) {
-			try {
-				const hash = await $`git hash-object ${file} 2>/dev/null`.text();
-				files.set(file, hash.trim());
-			} catch {}
-		}
-	} catch {}
-	return { files };
-}
-
-function getModifiedFilesSinceSnapshot(
-	before: FileSnapshot,
-	after: FileSnapshot,
-): string[] {
-	const changedFiles: string[] = [];
-	for (const [file, hash] of after.files) {
-		if (before.files.get(file) !== hash) changedFiles.push(file);
-	}
-	for (const [file] of before.files) {
-		if (!after.files.has(file)) changedFiles.push(file);
-	}
-	return changedFiles;
-}
-
-function extractErrors(output: string): string[] {
-	const errors: string[] = [];
-	const lines = output.split("\n");
-	for (const line of lines) {
-		const lower = line.toLowerCase();
-		if (
-			lower.includes("error:") ||
-			lower.includes("failed:") ||
-			lower.includes("exception:") ||
-			lower.includes("typeerror") ||
-			lower.includes("syntaxerror") ||
-			lower.includes("referenceerror") ||
-			(lower.includes("test") && lower.includes("fail"))
-		) {
-			const cleaned = line.trim().substring(0, 200);
-			if (cleaned && !errors.includes(cleaned)) errors.push(cleaned);
-		}
-	}
-	return errors.slice(0, 10);
-}
-
-// ============================================================================
 // Command: status
 // ============================================================================
 
@@ -1516,6 +937,18 @@ function cmdStatus(flags: Record<string, string | boolean>): void {
 	const state = loadState();
 	const history = loadHistory();
 	const context = loadContext();
+
+	if (flags.json) {
+		console.log(
+			JSON.stringify({
+				active: state?.active ?? false,
+				state: state ?? null,
+				history: history ?? null,
+				context: context ?? null,
+			}),
+		);
+		return;
+	}
 
 	console.log(`
 ╔══════════════════════════════════════════════════════════════════╗
@@ -1532,11 +965,7 @@ function cmdStatus(flags: Record<string, string | boolean>): void {
 		console.log(`   Started:      ${state.startedAt}`);
 		console.log(`   Elapsed:      ${formatDurationLong(elapsed)}`);
 		console.log(`   Promise:      ${state.completionPromise}`);
-		const agentLabel = state.agent
-			? (AGENTS[state.agent]?.configName ?? state.agent)
-			: "OpenCode";
-		console.log(`   Agent:        ${agentLabel}`);
-		if (state.model) console.log(`   Model:        ${state.model}`);
+		if (state.loopId) console.log(`   Loop ID:      ${state.loopId}`);
 		if (state.structuredTasksFile) {
 			console.log(`   Tasks File:   ${state.structuredTasksFile}`);
 			if (state.milestoneFilter)
@@ -1592,15 +1021,28 @@ function cmdContext(
 	if (flags.clear) {
 		if (existsSync(getContextPath())) {
 			unlinkSync(getContextPath());
-			console.log(`✅ Context cleared`);
+			if (flags.json) {
+				console.log(JSON.stringify({ success: true, action: "cleared" }));
+			} else {
+				console.log(`✅ Context cleared`);
+			}
 		} else {
-			console.log(`ℹ️  No pending context to clear`);
+			if (flags.json) {
+				console.log(JSON.stringify({ success: true, action: "no_context" }));
+			} else {
+				console.log(`ℹ️  No pending context to clear`);
+			}
 		}
 		return;
 	}
 
 	const contextText = args.join(" ");
 	if (!contextText) {
+		if (flags.json) {
+			const context = loadContext();
+			console.log(JSON.stringify({ context: context ?? null }));
+			return;
+		}
 		console.error("Error: No context text provided");
 		console.error("Usage: chief-wiggum context <text>");
 		console.error("       chief-wiggum context --clear");
@@ -1619,6 +1061,11 @@ function cmdContext(
 		writeFileSync(contextPath, existing + newEntry);
 	} else {
 		writeFileSync(contextPath, `# Ralph Loop Context\n${newEntry}`);
+	}
+
+	if (flags.json) {
+		console.log(JSON.stringify({ success: true, action: "added" }));
+		return;
 	}
 
 	console.log(`✅ Context added for next iteration`);
@@ -1721,10 +1168,32 @@ function cmdTasks(
 	if (structuredTasksFile) {
 		const data = loadStructuredTasks();
 		if (data) {
+			const allTasks = Array.from(data.allTasks.values());
+			const complete = allTasks.filter((t) => t.status === "complete").length;
+			const inProgress = allTasks.filter(
+				(t) => t.status === "in-progress",
+			).length;
+			const todo = allTasks.filter((t) => t.status === "todo").length;
+
+			if (flags.json) {
+				console.log(
+					JSON.stringify({
+						total: allTasks.length,
+						complete,
+						inProgress,
+						todo,
+						tasks: allTasks,
+					}),
+				);
+				return;
+			}
+
 			console.log("Structured Tasks:\n");
 			for (const [milestone, tasks] of data.milestones) {
-				const complete = tasks.filter((t) => t.status === "complete").length;
-				console.log(`## ${milestone} (${complete}/${tasks.length})`);
+				const completeCount = tasks.filter(
+					(t) => t.status === "complete",
+				).length;
+				console.log(`## ${milestone} (${completeCount}/${tasks.length})`);
 				for (const task of tasks) {
 					const icon =
 						task.status === "complete"
@@ -1742,6 +1211,18 @@ function cmdTasks(
 
 	const tasksPath = getTasksPath();
 	if (!existsSync(tasksPath)) {
+		if (flags.json) {
+			console.log(
+				JSON.stringify({
+					total: 0,
+					complete: 0,
+					inProgress: 0,
+					todo: 0,
+					tasks: [],
+				}),
+			);
+			return;
+		}
 		console.log("No tasks file found.");
 		console.log("Use 'chief-wiggum tasks add <description>' to create tasks.");
 		return;
@@ -1749,6 +1230,22 @@ function cmdTasks(
 
 	const content = readFileSync(tasksPath, "utf-8");
 	const tasks = parseTasks(content);
+
+	if (flags.json) {
+		const complete = tasks.filter((t) => t.status === "complete").length;
+		const inProgress = tasks.filter((t) => t.status === "in-progress").length;
+		const todo = tasks.filter((t) => t.status === "todo").length;
+		console.log(
+			JSON.stringify({
+				total: tasks.length,
+				complete,
+				inProgress,
+				todo,
+				tasks,
+			}),
+		);
+		return;
+	}
 
 	if (tasks.length === 0) {
 		console.log("No tasks found.");
@@ -1778,479 +1275,1066 @@ function cmdTasks(
 }
 
 // ============================================================================
-// Command: run
+// Command: stop
 // ============================================================================
 
-async function cmdRun(
+function cmdStop(flags: Record<string, string | boolean>): void {
+	if (flags.workspace) workspaceRoot = flags.workspace as string;
+
+	const state = loadState();
+
+	if (!state?.active) {
+		if (flags.json) {
+			console.log(
+				JSON.stringify({ success: false, error: "No active loop to stop" }),
+			);
+		} else {
+			console.log(`ℹ️  No active loop to stop`);
+		}
+		return;
+	}
+
+	state.active = false;
+	saveState(state);
+
+	if (flags.json) {
+		console.log(
+			JSON.stringify({
+				success: true,
+				stoppedAt: new Date().toISOString(),
+				iteration: state.iteration,
+			}),
+		);
+	} else {
+		console.log(`✅ Loop stopped at iteration ${state.iteration}`);
+	}
+}
+
+// ============================================================================
+// Command: logs
+// ============================================================================
+
+interface LogFileSummary {
+	filename: string;
+	path: string;
+	milestone: string;
+	timestamp: Date;
+	sizeBytes: number;
+	lineCount: number;
+	iterations: number;
+	toolsUsed: Record<string, number>;
+	duration: string | null;
+}
+
+function parseLogFile(filePath: string): LogFileSummary | null {
+	try {
+		const content = readFileSync(filePath, "utf-8");
+		const lines = content.split("\n");
+		const filename = filePath.split("/").pop() || "";
+
+		// Parse filename: <milestone>-<timestamp>.log
+		// Filename format: milestone-YYYY-MM-DDTHH-MM-SS.log
+		const match = filename.match(
+			/^(.+)-(\d{4}-\d{2}-\d{2})T(\d{2})-(\d{2})-(\d{2})\.log$/,
+		);
+		const milestone = match?.[1] || "unknown";
+		const timestamp = match
+			? new Date(`${match[2]}T${match[3]}:${match[4]}:${match[5]}`)
+			: new Date(0);
+
+		// Count iterations
+		const iterationMatches = content.match(/🔄 Iteration \d+/g);
+		const iterations = iterationMatches?.length || 0;
+
+		// Parse tools used
+		const toolsUsed: Record<string, number> = {};
+		const toolMatches = content.matchAll(/\| Tools\s+(.+)/g);
+		for (const toolMatch of toolMatches) {
+			const toolLine = toolMatch[1];
+			const toolParts = toolLine.split("•").map((s) => s.trim());
+			for (const part of toolParts) {
+				const [name, countStr] = part.split(/\s+/);
+				if (name && countStr) {
+					const count = parseInt(countStr, 10) || 0;
+					toolsUsed[name] = (toolsUsed[name] || 0) + count;
+				}
+			}
+		}
+
+		// Try to find duration
+		const durationMatch = content.match(/Total time:\s+(.+)/);
+		const duration = durationMatch?.[1] || null;
+
+		const stats = Bun.file(filePath);
+
+		return {
+			filename,
+			path: filePath,
+			milestone,
+			timestamp,
+			sizeBytes: stats.size,
+			lineCount: lines.length,
+			iterations,
+			toolsUsed,
+			duration,
+		};
+	} catch {
+		return null;
+	}
+}
+
+function formatBytes(bytes: number): string {
+	if (bytes < 1024) return `${bytes} B`;
+	if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
+	return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
+}
+
+async function cmdLogs(
 	args: string[],
 	flags: Record<string, string | boolean>,
 ): Promise<void> {
-	// Build options from flags
-	const opts: RunOptions = {
-		prompt: "",
-		promptFile: (flags.prompt as string) || "",
-		model: (flags.model as string) || "anthropic/claude-sonnet-4-5",
-		agent: ((flags.agent as string) || "opencode") as AgentType,
-		iterations: parseInt((flags.iterations as string) || "0", 10) || 0,
-		tasksFile: (flags.tasksFile as string) || null,
-		milestone: (flags.milestone as string) || null,
-		workspace: (flags.workspace as string) || process.cwd(),
-		repo: (flags.repo as string) || null,
-		branch: (flags.branch as string) || null,
-		done: (flags.done as string) || "COMPLETE",
-		next: (flags.next as string) || "READY_FOR_NEXT_TASK",
-		timeout: parseInt((flags.timeout as string) || "30", 10) || 30,
-		force: !!flags.force,
-		verbose: !!flags.verbose,
-		quiet: !!flags.quiet,
-		noCommit: !!flags.noCommit,
-		interactive: !!flags.interactive,
-		noPlugins: !!flags.noPlugins,
-		log: !!flags.log,
-	};
+	if (flags.workspace) workspaceRoot = flags.workspace as string;
 
-	// Set globals
-	workspaceRoot = opts.workspace;
-	structuredTasksFile = opts.tasksFile;
-	milestoneFilter = opts.milestone;
+	const logDir = getLogDir();
+	const subcommand = args[0] || "show";
 
-	// Load prompt
-	if (opts.promptFile) {
-		if (!existsSync(opts.promptFile)) {
-			console.error(`Error: Prompt file not found: ${opts.promptFile}`);
-			process.exit(1);
+	if (subcommand === "archive") {
+		// Archive old logs
+		if (!existsSync(logDir)) {
+			console.log("ℹ️  No logs directory found");
+			return;
 		}
-		opts.prompt = readFileSync(opts.promptFile, "utf-8");
-	} else if (args.length > 0) {
-		// Check if first arg is a file
-		if (args.length === 1 && existsSync(args[0])) {
-			opts.promptFile = args[0];
-			opts.prompt = readFileSync(args[0], "utf-8");
-		} else {
-			opts.prompt = args.join(" ");
-		}
-	}
 
-	if (!opts.prompt) {
-		console.error("Error: No prompt provided");
-		console.error("Usage: chief-wiggum run -f <file> [options]");
-		console.error("       chief-wiggum run <prompt> [options]");
-		process.exit(1);
-	}
+		const archiveDir = join(logDir, "archive");
+		if (!existsSync(archiveDir)) mkdirSync(archiveDir, { recursive: true });
 
-	// Handle worktree setup
-	if (opts.repo) {
-		if (!opts.promptFile) {
-			console.error("Error: --repo requires -f <prompt-file>");
-			process.exit(1);
-		}
-		const result = await setupWorktree(
-			opts.repo,
-			opts.prompt,
-			opts.branch,
-			opts.promptFile,
-			opts.tasksFile,
+		const files = await Array.fromAsync(
+			new Bun.Glob("*.log").scan({ cwd: logDir, onlyFiles: true }),
 		);
-		workspaceRoot = result.worktreePath;
-		opts.workspace = result.worktreePath;
-		if (result.tasksFile) structuredTasksFile = result.tasksFile;
 
-		const newPromptPath = join(workspaceRoot, result.promptFile);
-		if (existsSync(newPromptPath)) {
-			opts.prompt = readFileSync(newPromptPath, "utf-8");
+		if (files.length === 0) {
+			console.log("ℹ️  No log files to archive");
+			return;
 		}
-	}
 
-	// Validate agent
-	const agentConfig = AGENTS[opts.agent];
-	if (!agentConfig) {
-		console.error(`Error: Unknown agent: ${opts.agent}`);
-		console.error("Available: opencode, claude-code, codex");
-		process.exit(1);
-	}
+		// Keep the 5 most recent, archive the rest
+		const summaries = files
+			.map((f) => parseLogFile(join(logDir, f)))
+			.filter((s): s is LogFileSummary => s !== null)
+			.sort((a, b) => b.timestamp.getTime() - a.timestamp.getTime());
 
-	const agentPath = Bun.which(agentConfig.command);
-	if (!agentPath) {
-		console.error(
-			`Error: ${agentConfig.configName} CLI ('${agentConfig.command}') not found`,
+		const toArchive = summaries.slice(5);
+		if (toArchive.length === 0) {
+			console.log("ℹ️  Only 5 or fewer logs exist, nothing to archive");
+			return;
+		}
+
+		// Move old logs to archive
+		let archivedSize = 0;
+		for (const log of toArchive) {
+			const src = log.path;
+			const dest = join(archiveDir, log.filename);
+			copyFileSync(src, dest);
+			unlinkSync(src);
+			archivedSize += log.sizeBytes;
+		}
+
+		console.log(
+			`✅ Archived ${toArchive.length} log files (${formatBytes(archivedSize)})`,
 		);
-		process.exit(1);
+		console.log(`   Location: ${archiveDir}`);
+		return;
 	}
 
-	// Check for existing state
-	const existingState = loadState();
-	if (existingState?.active) {
-		if (opts.force) {
+	// Default: show last N lines of most recent log
+	if (!existsSync(logDir)) {
+		console.log("ℹ️  No logs directory found");
+		console.log("   Run with --log flag to enable logging");
+		return;
+	}
+
+	const files = await Array.fromAsync(
+		new Bun.Glob("*.log").scan({ cwd: logDir, onlyFiles: true }),
+	);
+
+	if (files.length === 0) {
+		console.log("ℹ️  No log files found");
+		return;
+	}
+
+	// Find most recent log
+	const summaries = files
+		.map((f) => parseLogFile(join(logDir, f)))
+		.filter((s): s is LogFileSummary => s !== null)
+		.sort((a, b) => b.timestamp.getTime() - a.timestamp.getTime());
+
+	if (summaries.length === 0) {
+		console.log("ℹ️  No valid log files found");
+		return;
+	}
+
+	const mostRecent = summaries[0];
+	const lineCount = parseInt((flags.lines as string) || "1000", 10) || 1000;
+
+	const content = readFileSync(mostRecent.path, "utf-8");
+	const lines = content.split("\n");
+	const startLine = Math.max(0, lines.length - lineCount);
+	const outputLines = lines.slice(startLine);
+
+	console.log(`📄 ${mostRecent.filename} (last ${outputLines.length} lines)\n`);
+	console.log(outputLines.join("\n"));
+}
+
+// ============================================================================
+// Command: summary
+// ============================================================================
+
+async function cmdSummary(
+	args: string[],
+	flags: Record<string, string | boolean>,
+): Promise<void> {
+	if (flags.workspace) workspaceRoot = flags.workspace as string;
+
+	const subcommand = args[0];
+
+	if (!subcommand) {
+		console.log("Usage: chief-wiggum summary <logs|suggest>");
+		console.log("  logs    - Generate summary of all logs");
+		console.log("  suggest - Show suggested tasks");
+		return;
+	}
+
+	if (subcommand === "logs") {
+		const logDir = getLogDir();
+
+		if (!existsSync(logDir)) {
+			console.log("ℹ️  No logs directory found");
+			return;
+		}
+
+		// Collect logs from main dir and archive
+		const mainFiles = await Array.fromAsync(
+			new Bun.Glob("*.log").scan({ cwd: logDir, onlyFiles: true }),
+		);
+		const mainSummaries = mainFiles
+			.map((f) => parseLogFile(join(logDir, f)))
+			.filter((s): s is LogFileSummary => s !== null);
+
+		const archiveDir = join(logDir, "archive");
+		let archivedSummaries: LogFileSummary[] = [];
+		if (existsSync(archiveDir)) {
+			const archiveFiles = await Array.fromAsync(
+				new Bun.Glob("*.log").scan({ cwd: archiveDir, onlyFiles: true }),
+			);
+			archivedSummaries = archiveFiles
+				.map((f) => parseLogFile(join(archiveDir, f)))
+				.filter((s): s is LogFileSummary => s !== null);
+		}
+
+		const allSummaries = [...mainSummaries, ...archivedSummaries].sort(
+			(a, b) => b.timestamp.getTime() - a.timestamp.getTime(),
+		);
+
+		if (allSummaries.length === 0) {
+			console.log("ℹ️  No log files found");
+			return;
+		}
+
+		// Calculate totals
+		let totalSize = 0;
+		let totalIterations = 0;
+		const allToolsUsed: Record<string, number> = {};
+
+		for (const log of allSummaries) {
+			totalSize += log.sizeBytes;
+			totalIterations += log.iterations;
+			for (const [tool, count] of Object.entries(log.toolsUsed)) {
+				allToolsUsed[tool] = (allToolsUsed[tool] || 0) + count;
+			}
+		}
+
+		const topTools = Object.entries(allToolsUsed)
+			.sort((a, b) => b[1] - a[1])
+			.slice(0, 10)
+			.map(([name, count]) => `- ${name}: ${count}`)
+			.join("\n");
+
+		const milestones = [...new Set(allSummaries.map((l) => l.milestone))];
+
+		// Generate summary file
+		const summaryTimestamp = new Date()
+			.toISOString()
+			.replace(/[:.]/g, "-")
+			.slice(0, 19);
+		const summaryPath = join(
+			getStateDir(),
+			`session-summary-${summaryTimestamp}.md`,
+		);
+
+		const summaryContent = `# Session Summary
+
+**Generated:** ${new Date().toLocaleString()}
+**Log Files:** ${allSummaries.length} (${mainSummaries.length} active, ${archivedSummaries.length} archived)
+**Total Size:** ${formatBytes(totalSize)}
+**Total Iterations:** ${totalIterations}
+**Milestones:** ${milestones.join(", ")}
+
+## Top Tools Used
+
+${topTools || "No tool usage recorded"}
+
+## Log Files
+
+| File | Milestone | Iterations | Size |
+|------|-----------|------------|------|
+${allSummaries.map((log) => `| ${log.filename} | ${log.milestone} | ${log.iterations} | ${formatBytes(log.sizeBytes)} |`).join("\n")}
+`;
+
+		writeFileSync(summaryPath, summaryContent);
+
+		console.log(`✅ Generated session summary`);
+		console.log(`   File: ${summaryPath}`);
+		console.log(
+			`   Logs: ${allSummaries.length} files (${mainSummaries.length} active, ${archivedSummaries.length} archived)`,
+		);
+		console.log(`   Iterations: ${totalIterations}`);
+		console.log(
+			`   Tools: ${Object.keys(allToolsUsed).length} unique tools used`,
+		);
+		return;
+	}
+
+	if (subcommand === "suggest") {
+		const suggestedTasksPath = getSuggestedTasksPath();
+
+		if (!existsSync(suggestedTasksPath)) {
+			console.log("ℹ️  No suggested tasks found");
 			console.log(
-				`⚠️  Clearing stale state from iteration ${existingState.iteration}`,
+				"   Suggested tasks are generated during Ralph loop iterations",
 			);
-			clearState();
-		} else {
-			console.error(
-				`Error: Loop already active (iteration ${existingState.iteration})`,
-			);
-			console.error(`Started: ${existingState.startedAt}`);
-			console.error(`Use --force to clear and restart`);
-			process.exit(1);
+			return;
 		}
-	}
 
-	// Initialize logging
-	if (opts.log) {
-		logFilePath = "auto";
-		initLogFile();
-	}
+		const content = readFileSync(suggestedTasksPath, "utf-8");
+		const taskCount = (content.match(/^- \[ \]/gm) || []).length;
 
-	// Print banner
-	console.log(`
+		console.log(`
 ╔══════════════════════════════════════════════════════════════════╗
-║                  Chief Wiggum - Ralph Loop                      ║
-║         Iterative AI Development with ${agentConfig.configName.padEnd(20)}        ║
+║                    Ralph Loop - Suggested Tasks                  ║
 ╚══════════════════════════════════════════════════════════════════╝
 `);
-
-	const promptPreview =
-		opts.prompt.replace(/\s+/g, " ").substring(0, 60) +
-		(opts.prompt.length > 60 ? "..." : "");
-	console.log(`Prompt:     ${promptPreview}`);
-	console.log(`Agent:      ${agentConfig.configName}`);
-	console.log(`Model:      ${opts.model}`);
-	console.log(
-		`Iterations: ${opts.iterations > 0 ? opts.iterations : "unlimited"}`,
-	);
-	console.log(
-		`Timeout:    ${opts.timeout > 0 ? `${opts.timeout} minutes` : "disabled"}`,
-	);
-	if (opts.tasksFile) {
-		console.log(`Tasks:      ${opts.tasksFile}`);
-		if (opts.milestone) console.log(`Milestone:  ${opts.milestone}`);
-		const summary = getStructuredTasksSummary(opts.milestone);
-		console.log(`Progress:   ${summary.completed}/${summary.total} complete`);
+		console.log(content);
+		console.log("─".repeat(68));
+		console.log(`Total: ${taskCount} pending task(s)`);
+		console.log(`\nFile: ${suggestedTasksPath}`);
+		return;
 	}
-	console.log("");
-	console.log("Starting loop... (Ctrl+C to stop)");
-	console.log("═".repeat(68));
 
-	// Initialize state
-	const state: RalphState = {
-		active: true,
-		iteration: 1,
-		maxIterations: opts.iterations,
-		completionPromise: opts.done,
-		tasksMode: !!opts.tasksFile,
-		taskPromise: opts.next,
-		prompt: opts.prompt,
-		startedAt: new Date().toISOString(),
-		model: opts.model,
-		agent: opts.agent,
-		workspaceRoot,
-		structuredTasksFile,
-		milestoneFilter,
-		logFile: logFilePath,
-	};
-	saveState(state);
+	console.log(`Unknown subcommand: ${subcommand}`);
+	console.log("Usage: chief-wiggum summary <logs|suggest>");
+}
 
-	// Initialize history
-	const history: RalphHistory = {
-		iterations: [],
-		totalDurationMs: 0,
-		struggleIndicators: {
-			repeatedErrors: {},
-			noProgressIterations: 0,
-			shortIterations: 0,
+// ============================================================================
+// Loop ID generation
+// ============================================================================
+
+function generateLoopId(): string {
+	const timestamp = Date.now().toString(36);
+	const random = Math.random().toString(36).substring(2, 8);
+	return `${timestamp}-${random}`;
+}
+
+// ============================================================================
+// Command: serve
+// ============================================================================
+
+const CORS_HEADERS = {
+	"Access-Control-Allow-Origin": "*",
+	"Access-Control-Allow-Methods": "GET, POST, OPTIONS",
+	"Access-Control-Allow-Headers": "Content-Type",
+};
+
+function jsonResponse(data: unknown, status = 200): Response {
+	return new Response(JSON.stringify(data), {
+		status,
+		headers: {
+			"Content-Type": "application/json",
+			...CORS_HEADERS,
 		},
-	};
-	saveHistory(history);
+	});
+}
 
-	// Track subprocess for cleanup
-	let currentProc: ReturnType<typeof Bun.spawn> | null = null;
-	let caffeinateProc: ReturnType<typeof Bun.spawn> | null = null;
-	let stopping = false;
+function logRequest(method: string, path: string, status: number): void {
+	const timestamp = new Date().toISOString();
+	console.log(`[${timestamp}] ${method} ${path} → ${status}`);
+}
 
-	// Prevent Mac from sleeping while the loop runs
-	if (process.platform === "darwin") {
-		try {
-			caffeinateProc = Bun.spawn(["caffeinate", "-i"], {
-				stdin: "ignore",
-				stdout: "ignore",
-				stderr: "ignore",
-			});
-			console.log("☕ Sleep prevention enabled (caffeinate)");
-		} catch {
-			console.log(
-				"⚠️  Could not start caffeinate - Mac may sleep during long iterations",
-			);
-		}
-	}
+function cmdServe(flags: Record<string, string | boolean>): void {
+	if (flags.workspace) workspaceRoot = flags.workspace as string;
+	if (flags.tasksFile) structuredTasksFile = flags.tasksFile as string;
 
-	const stopCaffeinate = () => {
-		if (caffeinateProc) {
+	const port = parseInt((flags.port as string) || "3456", 10);
+
+	const server = Bun.serve<WSData>({
+		port,
+		fetch(req, server) {
+			const url = new URL(req.url);
+			const path = url.pathname;
+			const method = req.method;
+
+			// Handle WebSocket upgrade for /events endpoint
+			if (path === "/events") {
+				const clientId = wsManager.generateClientId();
+				const upgraded = server.upgrade(req, {
+					data: { id: clientId },
+				});
+				if (upgraded) {
+					logRequest("WS", path, 101);
+					return undefined;
+				}
+				logRequest("WS", path, 400);
+				return new Response("WebSocket upgrade failed", { status: 400 });
+			}
+
+			if (method === "OPTIONS") {
+				logRequest(method, path, 204);
+				return new Response(null, { status: 204, headers: CORS_HEADERS });
+			}
+
+			let response: Response;
+
 			try {
-				caffeinateProc.kill();
-			} catch {}
-			caffeinateProc = null;
-		}
-	};
+				if (method === "GET" && path === "/status") {
+					const state = loadState();
+					const history = loadHistory();
+					const context = loadContext();
+					response = jsonResponse({
+						active: state?.active ?? false,
+						state: state ?? null,
+						history: history ?? null,
+						context: context ?? null,
+					});
+				} else if (method === "GET" && path === "/history") {
+					const history = loadHistory();
+					response = jsonResponse(history);
+				} else if (method === "GET" && path === "/tasks") {
+					if (structuredTasksFile) {
+						const data = loadStructuredTasks();
+						if (data) {
+							const allTasks = Array.from(data.allTasks.values());
+							const complete = allTasks.filter(
+								(t) => t.status === "complete",
+							).length;
+							const inProgress = allTasks.filter(
+								(t) => t.status === "in-progress",
+							).length;
+							const todo = allTasks.filter((t) => t.status === "todo").length;
+							response = jsonResponse({
+								total: allTasks.length,
+								complete,
+								inProgress,
+								todo,
+								tasks: allTasks,
+							});
+						} else {
+							response = jsonResponse({
+								total: 0,
+								complete: 0,
+								inProgress: 0,
+								todo: 0,
+								tasks: [],
+							});
+						}
+					} else {
+						const tasksPath = getTasksPath();
+						if (existsSync(tasksPath)) {
+							const content = readFileSync(tasksPath, "utf-8");
+							const tasks = parseTasks(content);
+							const complete = tasks.filter(
+								(t) => t.status === "complete",
+							).length;
+							const inProgress = tasks.filter(
+								(t) => t.status === "in-progress",
+							).length;
+							const todo = tasks.filter((t) => t.status === "todo").length;
+							response = jsonResponse({
+								total: tasks.length,
+								complete,
+								inProgress,
+								todo,
+								tasks,
+							});
+						} else {
+							response = jsonResponse({
+								total: 0,
+								complete: 0,
+								inProgress: 0,
+								todo: 0,
+								tasks: [],
+							});
+						}
+					}
+				} else if (method === "POST" && path === "/start") {
+					return (async () => {
+						try {
+							const body = await req.json();
+							const promptFile = body.promptFile as string | undefined;
+							const promptText = body.prompt as string | undefined;
+							const tasksFile = body.tasksFile as string | undefined;
+							const milestone = body.milestone as string | undefined;
 
-	process.on("SIGINT", () => {
-		if (stopping) {
-			console.log("\nForce stopping...");
-			stopCaffeinate();
-			process.exit(1);
-		}
-		stopping = true;
-		console.log("\nStopping Ralph loop...");
-		if (currentProc) {
-			try {
-				currentProc.kill("SIGKILL");
-			} catch {}
-		}
-		stopCaffeinate();
-		clearState();
-		console.log("Loop cancelled.");
-		process.exit(0);
+							// Check if there's already an active loop
+							const existingState = loadState();
+							if (existingState?.active) {
+								const resp = jsonResponse(
+									{ success: false, error: "A loop is already active" },
+									400,
+								);
+								logRequest(method, path, 400);
+								return resp;
+							}
+
+							// Set tasks file if provided
+							if (tasksFile) {
+								structuredTasksFile = tasksFile;
+							}
+
+							// Build the prompt
+							let prompt = "";
+							if (promptFile) {
+								const promptPath = join(workspaceRoot, promptFile);
+								if (!existsSync(promptPath)) {
+									const resp = jsonResponse(
+										{
+											success: false,
+											error: `Prompt file not found: ${promptFile}`,
+										},
+										400,
+									);
+									logRequest(method, path, 400);
+									return resp;
+								}
+								prompt = readFileSync(promptPath, "utf-8");
+							} else if (promptText) {
+								prompt = promptText;
+							} else {
+								const resp = jsonResponse(
+									{
+										success: false,
+										error: "Either 'promptFile' or 'prompt' is required",
+									},
+									400,
+								);
+								logRequest(method, path, 400);
+								return resp;
+							}
+
+							// Generate loop ID
+							const loopId = generateLoopId();
+
+							// Create initial state
+							const newState: RalphState = {
+								active: true,
+								iteration: 1,
+								maxIterations: 0, // unlimited
+								completionPromise: "COMPLETE",
+								tasksMode: !!structuredTasksFile,
+								taskPromise: "READY_FOR_NEXT_TASK",
+								prompt,
+								startedAt: new Date().toISOString(),
+								workspaceRoot,
+								structuredTasksFile: structuredTasksFile || null,
+								milestoneFilter: milestone || null,
+								loopId,
+							};
+
+							saveState(newState);
+
+							// Clear any existing history for new loop
+							clearHistory();
+
+							// Build the iteration prompt
+							const iterationPrompt = buildPrompt(newState);
+
+							// Get the first task if in structured tasks mode
+							let task: StructuredTask | null = null;
+							if (structuredTasksFile) {
+								task = getNextStructuredTask(milestone || null);
+							}
+
+							// Broadcast loop.started event
+							wsManager.broadcast({
+								type: "loop.started",
+								loopId,
+								prompt: iterationPrompt,
+								task: task || undefined,
+							});
+
+							const resp = jsonResponse({
+								success: true,
+								loopId,
+								prompt: iterationPrompt,
+								task: task || undefined,
+								iteration: 1,
+							});
+							logRequest(method, path, 200);
+							return resp;
+						} catch (e) {
+							const message =
+								e instanceof Error ? e.message : "Invalid request";
+							const resp = jsonResponse(
+								{ success: false, error: message },
+								400,
+							);
+							logRequest(method, path, 400);
+							return resp;
+						}
+					})();
+				} else if (method === "POST" && path === "/iteration/complete") {
+					return (async () => {
+						try {
+							const body = await req.json();
+							const filesModified = (body.filesModified as string[]) || [];
+							const errors = (body.errors as string[]) || [];
+							const notes = body.notes as string | undefined;
+							const completionDetected = body.completionDetected as
+								| boolean
+								| undefined;
+
+							const state = loadState();
+							if (!state?.active) {
+								const resp = jsonResponse(
+									{ success: false, error: "No active loop" },
+									400,
+								);
+								logRequest(method, path, 400);
+								return resp;
+							}
+
+							// Record iteration in history
+							const history = loadHistory();
+							const iterationRecord: IterationHistory = {
+								iteration: state.iteration,
+								startedAt: state.startedAt,
+								endedAt: new Date().toISOString(),
+								durationMs: Date.now() - new Date(state.startedAt).getTime(),
+								toolsUsed: {},
+								filesModified,
+								exitCode: errors.length > 0 ? 1 : 0,
+								completionDetected: completionDetected ?? false,
+								errors,
+							};
+							history.iterations.push(iterationRecord);
+							history.totalDurationMs += iterationRecord.durationMs;
+							saveHistory(history);
+
+							// Broadcast iteration.completed event
+							wsManager.broadcast({
+								type: "iteration.completed",
+								iteration: state.iteration,
+								result: iterationRecord,
+							});
+
+							// Determine next action
+							let next: "continue" | "complete" | "stop" = "continue";
+							let task: StructuredTask | null = null;
+							let prompt: string | undefined;
+
+							// Check if loop was stopped
+							const currentState = loadState();
+							if (!currentState?.active) {
+								next = "stop";
+								// Broadcast loop.stopped event
+								wsManager.broadcast({
+									type: "loop.stopped",
+									reason: "Loop was stopped",
+									loopId: state.loopId || "",
+									iteration: state.iteration,
+								});
+							} else if (completionDetected) {
+								// Check if all tasks are complete
+								if (state.structuredTasksFile) {
+									const allComplete = allStructuredTasksComplete(
+										state.milestoneFilter || null,
+									);
+									if (allComplete) {
+										next = "complete";
+										state.active = false;
+										saveState(state);
+										// Broadcast loop.completed event
+										wsManager.broadcast({
+											type: "loop.completed",
+											history: loadHistory(),
+											loopId: state.loopId || "",
+										});
+									} else {
+										// Get next task
+										task = getNextStructuredTask(state.milestoneFilter || null);
+										if (!task) {
+											next = "complete";
+											state.active = false;
+											saveState(state);
+											// Broadcast loop.completed event
+											wsManager.broadcast({
+												type: "loop.completed",
+												history: loadHistory(),
+												loopId: state.loopId || "",
+											});
+										}
+									}
+								} else {
+									next = "complete";
+									state.active = false;
+									saveState(state);
+									// Broadcast loop.completed event
+									wsManager.broadcast({
+										type: "loop.completed",
+										history: loadHistory(),
+										loopId: state.loopId || "",
+									});
+								}
+							} else {
+								// Continue with next iteration
+								task = state.structuredTasksFile
+									? getNextStructuredTask(state.milestoneFilter || null)
+									: null;
+							}
+
+							// Increment iteration if continuing
+							if (next === "continue") {
+								state.iteration += 1;
+								state.startedAt = new Date().toISOString();
+								saveState(state);
+								prompt = buildPrompt(state);
+								// Broadcast iteration.started event
+								wsManager.broadcast({
+									type: "iteration.started",
+									iteration: state.iteration,
+									loopId: state.loopId || "",
+								});
+							}
+
+							const resp = jsonResponse({
+								success: true,
+								next,
+								iteration: state.iteration,
+								task: task || undefined,
+								prompt,
+							});
+							logRequest(method, path, 200);
+							return resp;
+						} catch (e) {
+							const message =
+								e instanceof Error ? e.message : "Invalid request";
+							const resp = jsonResponse(
+								{ success: false, error: message },
+								400,
+							);
+							logRequest(method, path, 400);
+							return resp;
+						}
+					})();
+				} else if (method === "POST" && path === "/task/mark") {
+					return (async () => {
+						try {
+							const body = await req.json();
+							const taskId = body.taskId as string;
+							const status = body.status as string;
+
+							if (!taskId) {
+								const resp = jsonResponse(
+									{ success: false, error: "Missing 'taskId' field" },
+									400,
+								);
+								logRequest(method, path, 400);
+								return resp;
+							}
+
+							if (
+								!status ||
+								!["todo", "in-progress", "complete"].includes(status)
+							) {
+								const resp = jsonResponse(
+									{
+										success: false,
+										error:
+											"Invalid 'status' - must be 'todo', 'in-progress', or 'complete'",
+									},
+									400,
+								);
+								logRequest(method, path, 400);
+								return resp;
+							}
+
+							const result = updateStructuredTaskStatus(
+								taskId,
+								status as "todo" | "in-progress" | "complete",
+							);
+
+							if (!result.success) {
+								const resp = jsonResponse(
+									{ success: false, error: result.error },
+									400,
+								);
+								logRequest(method, path, 400);
+								return resp;
+							}
+
+							// Get the updated task for broadcasting
+							const data = loadStructuredTasks();
+							const updatedTask = data?.allTasks.get(taskId);
+
+							// Broadcast task.updated event
+							if (updatedTask) {
+								wsManager.broadcast({
+									type: "task.updated",
+									task: updatedTask,
+									taskId,
+									status,
+								});
+							}
+
+							const resp = jsonResponse({
+								success: true,
+								taskId,
+								status,
+								updatedAt: new Date().toISOString(),
+							});
+							logRequest(method, path, 200);
+							return resp;
+						} catch (e) {
+							const message =
+								e instanceof Error ? e.message : "Invalid request";
+							const resp = jsonResponse(
+								{ success: false, error: message },
+								400,
+							);
+							logRequest(method, path, 400);
+							return resp;
+						}
+					})();
+				} else if (method === "GET" && path === "/context") {
+					const context = loadContext();
+					if (context) {
+						// Clear context after reading
+						clearContext();
+						response = jsonResponse({
+							hasContext: true,
+							context,
+							clearedAt: new Date().toISOString(),
+						});
+					} else {
+						response = jsonResponse({
+							hasContext: false,
+							context: null,
+						});
+					}
+				} else if (method === "GET" && path === "/next-task") {
+					const state = loadState();
+					if (!state?.active) {
+						response = jsonResponse({
+							hasTask: false,
+							complete: true,
+							reason: "No active loop",
+						});
+					} else if (state.structuredTasksFile) {
+						const task = getNextStructuredTask(state.milestoneFilter || null);
+						const allComplete = allStructuredTasksComplete(
+							state.milestoneFilter || null,
+						);
+						if (allComplete) {
+							response = jsonResponse({
+								hasTask: false,
+								complete: true,
+								reason: "All tasks complete",
+							});
+						} else if (task) {
+							response = jsonResponse({
+								hasTask: true,
+								complete: false,
+								task,
+							});
+						} else {
+							response = jsonResponse({
+								hasTask: false,
+								complete: false,
+								reason: "No available tasks (dependencies not met)",
+							});
+						}
+					} else {
+						response = jsonResponse({
+							hasTask: false,
+							complete: false,
+							reason: "Not in structured tasks mode",
+						});
+					}
+				} else if (method === "POST" && path === "/context") {
+					return (async () => {
+						try {
+							const body = await req.json();
+							const text = body.text as string;
+
+							if (!text) {
+								const resp = jsonResponse(
+									{ success: false, error: "Missing 'text' field" },
+									400,
+								);
+								logRequest(method, path, 400);
+								return resp;
+							}
+
+							const stateDir = getStateDir();
+							if (!existsSync(stateDir))
+								mkdirSync(stateDir, { recursive: true });
+
+							const timestamp = new Date().toISOString();
+							const newEntry = `\n## Context added at ${timestamp}\n${text}\n`;
+
+							const contextPath = getContextPath();
+							if (existsSync(contextPath)) {
+								const existing = readFileSync(contextPath, "utf-8");
+								writeFileSync(contextPath, existing + newEntry);
+							} else {
+								writeFileSync(contextPath, `# Ralph Loop Context\n${newEntry}`);
+							}
+
+							// Broadcast context.received event
+							wsManager.broadcast({
+								type: "context.received",
+								text,
+							});
+
+							const resp = jsonResponse({ success: true, action: "added" });
+							logRequest(method, path, 200);
+							return resp;
+						} catch (e) {
+							const resp = jsonResponse(
+								{ success: false, error: "Invalid JSON body" },
+								400,
+							);
+							logRequest(method, path, 400);
+							return resp;
+						}
+					})();
+				} else if (method === "POST" && path === "/stop") {
+					const state = loadState();
+					if (!state?.active) {
+						response = jsonResponse({
+							success: false,
+							error: "No active loop to stop",
+						});
+					} else {
+						state.active = false;
+						saveState(state);
+
+						// Broadcast loop.stopped event
+						wsManager.broadcast({
+							type: "loop.stopped",
+							reason: "Stopped by user request",
+							loopId: state.loopId || "",
+							iteration: state.iteration,
+						});
+
+						response = jsonResponse({
+							success: true,
+							stoppedAt: new Date().toISOString(),
+							iteration: state.iteration,
+						});
+					}
+				} else {
+					response = jsonResponse({ error: "Not found" }, 404);
+				}
+			} catch (error) {
+				const message =
+					error instanceof Error ? error.message : "Internal server error";
+				response = jsonResponse({ error: message }, 500);
+			}
+
+			logRequest(method, path, response.status);
+			return response;
+		},
+		websocket: {
+			open(ws) {
+				wsManager.addClient(ws);
+			},
+			message(ws, message) {
+				// We don't expect messages from clients, but log them if received
+				console.log(`[WS] Received message from ${ws.data.id}: ${message}`);
+			},
+			close(ws, code, reason) {
+				wsManager.removeClient(ws);
+			},
+			drain(ws) {
+				// Handle backpressure if needed
+			},
+		},
 	});
 
-	// Main loop
-	while (true) {
-		if (opts.iterations > 0 && state.iteration > opts.iterations) {
-			console.log(
-				`\n╔══════════════════════════════════════════════════════════════════╗`,
-			);
-			console.log(`║  Max iterations (${opts.iterations}) reached`);
-			console.log(
-				`║  Total time: ${formatDurationLong(history.totalDurationMs)}`,
-			);
-			console.log(
-				`╚══════════════════════════════════════════════════════════════════╝`,
-			);
-			stopCaffeinate();
-			clearState();
-			break;
-		}
-
-		const iterInfo = opts.iterations > 0 ? ` / ${opts.iterations}` : "";
-		console.log(`\n🔄 Iteration ${state.iteration}${iterInfo}`);
-
-		if (structuredTasksFile) {
-			const summary = getStructuredTasksSummary(milestoneFilter);
-			const nextTask = getNextStructuredTask(milestoneFilter);
-			console.log(
-				`   Tasks: ${summary.completed}/${summary.total} | Next: ${nextTask?.id || "NONE"}`,
-			);
-		}
-		console.log("─".repeat(68));
-
-		const contextAtStart = loadContext();
-		const snapshotBefore = await captureFileSnapshot();
-		const fullPrompt = buildPrompt(state, agentConfig);
-		const iterationStart = Date.now();
-
-		try {
-			const cmdArgs = agentConfig.buildArgs(fullPrompt, opts.model, {
-				allowAllPermissions: !opts.interactive,
-			});
-			const env = agentConfig.buildEnv({
-				filterPlugins: opts.noPlugins,
-				allowAllPermissions: !opts.interactive,
-			});
-
-			currentProc = Bun.spawn([agentConfig.command, ...cmdArgs], {
-				env,
-				cwd: workspaceRoot,
-				stdin: "inherit",
-				stdout: "pipe",
-				stderr: "pipe",
-			});
-
-			let result = "";
-			let stderr = "";
-			let toolCounts = new Map<string, number>();
-			let timedOut = false;
-
-			if (!opts.quiet) {
-				console.log("⏳ Starting agent...");
-				const streamed = await streamProcessOutput(currentProc, {
-					compactTools: !opts.verbose,
-					toolSummaryIntervalMs: 3000,
-					heartbeatIntervalMs: 10000,
-					iterationStart,
-					agent: agentConfig,
-					inactivityTimeoutMs: opts.timeout * 60 * 1000,
-				});
-				result = streamed.stdoutText;
-				stderr = streamed.stderrText;
-				toolCounts = streamed.toolCounts;
-				timedOut = streamed.timedOut;
-			} else {
-				const stdoutPromise = new Response(
-					currentProc.stdout as ReadableStream<Uint8Array>,
-				).text();
-				const stderrPromise = new Response(
-					currentProc.stderr as ReadableStream<Uint8Array>,
-				).text();
-				[result, stderr] = await Promise.all([stdoutPromise, stderrPromise]);
-			}
-
-			const exitCode = await currentProc.exited;
-			currentProc = null;
-
-			if (timedOut) {
-				console.log(
-					`\n⚠️  Process killed due to inactivity timeout (${opts.timeout} minutes)`,
-				);
-			}
-
-			const combinedOutput = `${result}\n${stderr}`;
-			const completionDetected = new RegExp(
-				`<promise>\\s*${escapeRegex(opts.done)}\\s*</promise>`,
-				"i",
-			).test(combinedOutput);
-			const taskCompletionDetected = new RegExp(
-				`<promise>\\s*${escapeRegex(opts.next)}\\s*</promise>`,
-				"i",
-			).test(combinedOutput);
-
-			// Parse suggested tasks
-			const suggestedTasks = parseSuggestedTasks(combinedOutput);
-			if (suggestedTasks.length > 0)
-				appendSuggestedTasks(suggestedTasks, state.iteration);
-
-			const iterationDuration = Date.now() - iterationStart;
-
-			// Print summary
-			console.log("\nIteration Summary");
-			console.log("─".repeat(68));
-			console.log(`Iteration: ${state.iteration}`);
-			console.log(`Elapsed:   ${formatDuration(iterationDuration)}`);
-			console.log(`Tools:     ${formatToolSummary(toolCounts) || "none"}`);
-			console.log(`Exit code: ${exitCode}`);
-			console.log(
-				`Completion: ${completionDetected ? "detected" : "not detected"}`,
-			);
-
-			// Track history
-			const snapshotAfter = await captureFileSnapshot();
-			const filesModified = getModifiedFilesSinceSnapshot(
-				snapshotBefore,
-				snapshotAfter,
-			);
-			const errors = extractErrors(combinedOutput);
-
-			history.iterations.push({
-				iteration: state.iteration,
-				startedAt: new Date(iterationStart).toISOString(),
-				endedAt: new Date().toISOString(),
-				durationMs: iterationDuration,
-				toolsUsed: Object.fromEntries(toolCounts),
-				filesModified,
-				exitCode,
-				completionDetected,
-				errors,
-			});
-			history.totalDurationMs += iterationDuration;
-
-			// Update struggle indicators
-			const madeProgress =
-				filesModified.length > 0 ||
-				taskCompletionDetected ||
-				completionDetected;
-			if (!madeProgress) history.struggleIndicators.noProgressIterations++;
-			else history.struggleIndicators.noProgressIterations = 0;
-
-			if (iterationDuration < 30000)
-				history.struggleIndicators.shortIterations++;
-			else history.struggleIndicators.shortIterations = 0;
-
-			if (errors.length === 0) history.struggleIndicators.repeatedErrors = {};
-			else {
-				for (const error of errors) {
-					const key = error.substring(0, 100);
-					history.struggleIndicators.repeatedErrors[key] =
-						(history.struggleIndicators.repeatedErrors[key] || 0) + 1;
-				}
-			}
-			saveHistory(history);
-
-			// Check completion
-			if (completionDetected) {
-				console.log(
-					`\n╔══════════════════════════════════════════════════════════════════╗`,
-				);
-				console.log(`║  ✅ Completion detected!`);
-				console.log(`║  Completed in ${state.iteration} iteration(s)`);
-				console.log(
-					`║  Total time: ${formatDurationLong(history.totalDurationMs)}`,
-				);
-				console.log(
-					`╚══════════════════════════════════════════════════════════════════╝`,
-				);
-
-				if (milestoneFilter) {
-					try {
-						const tagName = `${milestoneFilter.toLowerCase()}-complete`;
-						await $`git tag -a ${tagName} -m "Milestone ${milestoneFilter} completed"`.quiet();
-						console.log(`🏷️  Tagged: ${tagName}`);
-					} catch {}
-				}
-
-				stopCaffeinate();
-				clearState();
-				clearHistory();
-				clearContext();
-				break;
-			}
-
-			if (contextAtStart) {
-				console.log(`📝 Context consumed`);
-				clearContext();
-			}
-
-			// Auto-commit
-			if (!opts.noCommit) {
-				try {
-					const status = await $`git status --porcelain`.text();
-					if (status.trim()) {
-						await $`git add -A`;
-						await $`git commit -m "Ralph iteration ${state.iteration}: work in progress"`.quiet();
-						console.log(`📝 Auto-committed`);
-					}
-				} catch {}
-			}
-
-			state.iteration++;
-			saveState(state);
-			await new Promise((r) => setTimeout(r, 1000));
-		} catch (error) {
-			if (currentProc) {
-				try {
-					currentProc.kill("SIGKILL");
-				} catch {}
-				currentProc = null;
-			}
-			console.error(`\n❌ Error in iteration ${state.iteration}:`, error);
-			console.log("Continuing to next iteration...");
-
-			history.iterations.push({
-				iteration: state.iteration,
-				startedAt: new Date(iterationStart).toISOString(),
-				endedAt: new Date().toISOString(),
-				durationMs: Date.now() - iterationStart,
-				toolsUsed: {},
-				filesModified: [],
-				exitCode: -1,
-				completionDetected: false,
-				errors: [String(error).substring(0, 200)],
-			});
-			history.totalDurationMs += Date.now() - iterationStart;
-			saveHistory(history);
-
-			state.iteration++;
-			saveState(state);
-			await new Promise((r) => setTimeout(r, 2000));
-		}
+	console.log(`🚀 Chief Wiggum server running on http://localhost:${port}`);
+	console.log(`   Workspace: ${workspaceRoot}`);
+	if (structuredTasksFile) {
+		console.log(`   Tasks file: ${structuredTasksFile}`);
 	}
+	console.log(`\n   Endpoints:`);
+	console.log(`   GET  /status            - Current loop state`);
+	console.log(`   GET  /history           - Iteration history`);
+	console.log(`   GET  /tasks             - Task list and summary`);
+	console.log(`   GET  /next-task         - Get next available task`);
+	console.log(`   GET  /context           - Get and clear pending context`);
+	console.log(`   POST /start             - Start a new loop`);
+	console.log(`   POST /iteration/complete - Record iteration result`);
+	console.log(`   POST /task/mark         - Mark task status`);
+	console.log(`   POST /context           - Add context`);
+	console.log(`   POST /stop              - Stop active loop`);
+	console.log(`   WS   /events            - Real-time event stream`);
+	console.log(`\n   Press Ctrl+C to stop\n`);
 }
+
+// ============================================================================
+// Help: serve
+// ============================================================================
+
+const HELP_SERVE = `
+chief-wiggum serve - Start HTTP server for state management
+
+Usage:
+  chief-wiggum serve [options]
+
+Options:
+  -p, --port <port>       Port to listen on (default: 3456)
+  -w, --workspace <dir>   Target different directory
+  -t, --tasks-file <path> Specify structured tasks file
+
+Endpoints:
+  GET  /status            - Current loop state as JSON
+  GET  /history           - Iteration history as JSON
+  GET  /tasks             - Task list and summary as JSON
+  GET  /next-task         - Get next available task or completion signal
+  GET  /context           - Get pending context and clear it
+  POST /start             - Start a new loop (body: {promptFile?, prompt?, tasksFile?, milestone?})
+  POST /iteration/complete - Record iteration result (body: {filesModified, errors, notes?, completionDetected?})
+  POST /task/mark         - Mark task status (body: {taskId, status})
+  POST /context           - Add context (body: {"text": "..."})
+  POST /stop              - Stop active loop
+  WS   /events            - Real-time event stream (WebSocket)
+
+WebSocket Events:
+  loop.started            - Loop initialized
+  iteration.started       - New iteration beginning
+  iteration.completed     - Iteration finished
+  task.updated           - Task status changed
+  context.received       - New context added
+  loop.completed         - All tasks complete
+  loop.stopped           - Loop stopped
+
+Examples:
+  chief-wiggum serve
+  chief-wiggum serve --port 8080
+  chief-wiggum serve -w ~/projects/my-app -t docs/tasks.md
+  
+  # Connect to WebSocket (using wscat)
+  wscat -c ws://localhost:3456/events
+`;
 
 // ============================================================================
 // Main
@@ -2267,9 +2351,6 @@ async function main(): Promise<void> {
 
 	if (parsed.flags.help) {
 		switch (parsed.command) {
-			case "run":
-				console.log(HELP_RUN);
-				break;
 			case "status":
 				console.log(HELP_STATUS);
 				break;
@@ -2279,18 +2360,25 @@ async function main(): Promise<void> {
 			case "tasks":
 				console.log(HELP_TASKS);
 				break;
+			case "logs":
+				console.log(HELP_LOGS);
+				break;
+			case "summary":
+				console.log(HELP_SUMMARY);
+				break;
+			case "stop":
+				console.log(HELP_STOP);
+				break;
+			case "serve":
+				console.log(HELP_SERVE);
+				break;
 			default:
 				console.log(HELP_MAIN);
 		}
 		process.exit(0);
 	}
 
-	// Default to run command if args/flags suggest it
-	if (!parsed.command) {
-		parsed.command = "run";
-	}
-
-	// Route to command
+	// Route to command - default to status if no command
 	switch (parsed.command) {
 		case "status":
 			cmdStatus(parsed.flags);
@@ -2301,8 +2389,20 @@ async function main(): Promise<void> {
 		case "tasks":
 			cmdTasks(parsed.args, parsed.flags);
 			break;
+		case "logs":
+			await cmdLogs(parsed.args, parsed.flags);
+			break;
+		case "summary":
+			await cmdSummary(parsed.args, parsed.flags);
+			break;
+		case "stop":
+			cmdStop(parsed.flags);
+			break;
+		case "serve":
+			cmdServe(parsed.flags);
+			break;
 		default:
-			await cmdRun(parsed.args, parsed.flags);
+			cmdStatus(parsed.flags);
 			break;
 	}
 }
