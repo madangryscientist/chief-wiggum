@@ -1379,6 +1379,150 @@ function appendToLog(text: string): void {
 }
 
 // ============================================================================
+// Log analysis
+// ============================================================================
+
+interface LogAnalysis {
+	iterations: number;
+	totalDuration: string;
+	tasksCompleted: string[];
+	errors: Array<{ error: string; count: number }>;
+	repeatedPatterns: Array<{ pattern: string; count: number; suggestion: string }>;
+	suggestions: string[];
+}
+
+function analyzeLogContent(content: string): LogAnalysis {
+	const lines = content.split("\n");
+	
+	// Count iterations
+	const iterationMatches = content.match(/🔄 Iteration \d+/g) || [];
+	const iterations = iterationMatches.length;
+
+	// Extract total duration from iteration summaries
+	const durationMatches = content.match(/Elapsed:\s+(\d+:\d+)/g) || [];
+	let totalSeconds = 0;
+	for (const match of durationMatches) {
+		const time = match.replace("Elapsed:", "").trim();
+		const [mins, secs] = time.split(":").map(Number);
+		totalSeconds += (mins || 0) * 60 + (secs || 0);
+	}
+	const totalMins = Math.floor(totalSeconds / 60);
+	const totalSecs = totalSeconds % 60;
+	const totalDuration = `${totalMins}:${String(totalSecs).padStart(2, "0")}`;
+
+	// Extract completed tasks
+	const tasksCompleted: string[] = [];
+	const taskCompleteRegex = /(?:completed?|done|finished|mark.*complete).*?(m\d+-\d+|task[- ]?\d+)/gi;
+	for (const taskMatch of content.matchAll(taskCompleteRegex)) {
+		const taskId = taskMatch[1].toLowerCase();
+		if (!tasksCompleted.includes(taskId)) {
+			tasksCompleted.push(taskId);
+		}
+	}
+
+	// Count errors
+	const errorCounts = new Map<string, number>();
+	const errorPatterns = [
+		/error:\s*(.{10,80})/gi,
+		/failed:\s*(.{10,80})/gi,
+		/exception:\s*(.{10,80})/gi,
+		/TypeError:\s*(.{10,50})/gi,
+		/SyntaxError:\s*(.{10,50})/gi,
+	];
+	for (const pattern of errorPatterns) {
+		for (const match of content.matchAll(pattern)) {
+			const error = match[1].trim().substring(0, 80);
+			errorCounts.set(error, (errorCounts.get(error) || 0) + 1);
+		}
+	}
+	const errors = Array.from(errorCounts.entries())
+		.map(([error, count]) => ({ error, count }))
+		.sort((a, b) => b.count - a.count)
+		.slice(0, 10);
+
+	// Detect repeated patterns that suggest prompt improvements
+	const repeatedPatterns: Array<{ pattern: string; count: number; suggestion: string }> = [];
+	const suggestions: string[] = [];
+
+	// Pattern: Checking test files multiple times
+	const testCheckMatches = content.match(/(?:run.*test|bun test|npm test|checking.*test|test.*pass)/gi) || [];
+	if (testCheckMatches.length > 3) {
+		repeatedPatterns.push({
+			pattern: "Test checking",
+			count: testCheckMatches.length,
+			suggestion: "Add test commands to prompt file to avoid repeated test discovery",
+		});
+		suggestions.push(`Tests were checked ${testCheckMatches.length} times. Consider adding test commands to the prompt file.`);
+	}
+
+	// Pattern: Reading same file multiple times
+	const fileReadCounts = new Map<string, number>();
+	const fileReadRegex = /(?:Read|Reading).*?([\/\w.-]+\.\w+)/gi;
+	for (const fileMatch of content.matchAll(fileReadRegex)) {
+		const file = fileMatch[1];
+		fileReadCounts.set(file, (fileReadCounts.get(file) || 0) + 1);
+	}
+	const frequentReads = Array.from(fileReadCounts.entries())
+		.filter(([_, count]) => count > 3)
+		.sort((a, b) => b[1] - a[1]);
+	if (frequentReads.length > 0) {
+		for (const [file, count] of frequentReads.slice(0, 3)) {
+			repeatedPatterns.push({
+				pattern: `Reading ${file}`,
+				count,
+				suggestion: `File read ${count} times. Consider caching or adding to context.`,
+			});
+		}
+	}
+
+	// Pattern: Searching for same thing multiple times
+	const searchCounts = new Map<string, number>();
+	const searchRegex = /(?:grep|search|find|looking for|searching).*?["']([^"']+)["']/gi;
+	for (const searchMatch of content.matchAll(searchRegex)) {
+		const term = searchMatch[1].substring(0, 50);
+		searchCounts.set(term, (searchCounts.get(term) || 0) + 1);
+	}
+	const frequentSearches = Array.from(searchCounts.entries())
+		.filter(([_, count]) => count > 2)
+		.sort((a, b) => b[1] - a[1]);
+	if (frequentSearches.length > 0) {
+		for (const [term, count] of frequentSearches.slice(0, 3)) {
+			repeatedPatterns.push({
+				pattern: `Searching "${term}"`,
+				count,
+				suggestion: `Searched ${count} times. Add location info to prompt.`,
+			});
+		}
+	}
+
+	// Pattern: Same error occurring multiple times
+	for (const { error, count } of errors) {
+		if (count > 2) {
+			suggestions.push(`Error "${error.substring(0, 40)}..." occurred ${count} times. May need targeted fix.`);
+		}
+	}
+
+	// Pattern: Git operations repeated
+	const gitMatches = content.match(/git (?:add|commit|push|status)/gi) || [];
+	if (gitMatches.length > 10) {
+		repeatedPatterns.push({
+			pattern: "Git operations",
+			count: gitMatches.length,
+			suggestion: "Many git operations. Consider batching commits.",
+		});
+	}
+
+	return {
+		iterations,
+		totalDuration,
+		tasksCompleted,
+		errors,
+		repeatedPatterns,
+		suggestions,
+	};
+}
+
+// ============================================================================
 // Suggested tasks
 // ============================================================================
 
@@ -2357,8 +2501,9 @@ function startHttpServer(port: number): ReturnType<typeof Bun.serve> {
 						}
 					})();
 				} else if (method === "GET" && path === "/summary") {
-					// Returns ALL log files in logs/ (not archived)
+					// Returns analyzed summary of ALL log files in logs/ (not archived)
 					const logDir = getLogDir();
+					const includeRaw = url.searchParams.get("raw") === "true";
 					
 					if (!existsSync(logDir)) {
 						response = jsonResponse({
@@ -2382,16 +2527,17 @@ function startHttpServer(port: number): ReturnType<typeof Bun.serve> {
 							let combinedContent = "";
 							for (const file of logFiles) {
 								const content = readFileSync(join(logDir, file), "utf-8");
-								combinedContent += `\n${"=".repeat(60)}\n`;
-								combinedContent += `LOG FILE: ${file}\n`;
-								combinedContent += `${"=".repeat(60)}\n`;
-								combinedContent += content;
+								combinedContent += content + "\n";
 							}
+
+							// Analyze the logs
+							const analysis = analyzeLogContent(combinedContent);
 
 							response = jsonResponse({
 								files: logFiles,
 								fileCount: logFiles.length,
-								content: combinedContent,
+								analysis,
+								...(includeRaw ? { rawContent: combinedContent } : {}),
 							});
 						}
 					}

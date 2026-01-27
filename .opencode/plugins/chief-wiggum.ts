@@ -340,15 +340,30 @@ const stop = tool({
 
 const summary = tool({
 	description:
-		"Get ALL current log files from the chief-wiggum logs folder (not archived). Shows combined output from all active session logs. Use archive_logs to move old logs to archive.",
-	args: {},
-	async execute() {
+		"Analyze ALL current log files from the chief-wiggum logs folder. Returns structured analysis including: iterations count, tasks completed, common errors, repeated patterns, and suggestions for prompt improvements. Use archive_logs to move old logs to archive before starting fresh.",
+	args: {
+		raw: tool.schema
+			.boolean()
+			.optional()
+			.describe("Include raw log content in addition to analysis (default: false)"),
+	},
+	async execute(args) {
+		const path = args.raw ? "/summary?raw=true" : "/summary";
+		
 		const result = await fetchJson<{
 			files: string[];
 			fileCount: number;
-			content: string;
+			analysis: {
+				iterations: number;
+				totalDuration: string;
+				tasksCompleted: string[];
+				errors: Array<{ error: string; count: number }>;
+				repeatedPatterns: Array<{ pattern: string; count: number; suggestion: string }>;
+				suggestions: string[];
+			};
+			rawContent?: string;
 			error?: string;
-		}>("/summary");
+		}>(path);
 
 		if (result.error) {
 			return `Error: ${result.error}`;
@@ -358,9 +373,45 @@ const summary = tool({
 			return `Error: ${result.data.error}`;
 		}
 
-		let output = `## Log Summary (${result.data?.fileCount} files)\n`;
-		output += `Files: ${result.data?.files?.join(", ")}\n\n`;
-		output += result.data?.content || "No content";
+		const analysis = result.data?.analysis;
+		if (!analysis) {
+			return "No analysis available";
+		}
+
+		let output = `# Log Analysis Summary\n\n`;
+		output += `**Files:** ${result.data?.fileCount} (${result.data?.files?.join(", ")})\n`;
+		output += `**Iterations:** ${analysis.iterations}\n`;
+		output += `**Total Duration:** ${analysis.totalDuration}\n`;
+
+		if (analysis.tasksCompleted.length > 0) {
+			output += `\n## Tasks Completed (${analysis.tasksCompleted.length})\n`;
+			output += analysis.tasksCompleted.join(", ") + "\n";
+		}
+
+		if (analysis.errors.length > 0) {
+			output += `\n## Errors Found\n`;
+			for (const { error, count } of analysis.errors) {
+				output += `- (${count}x) ${error}\n`;
+			}
+		}
+
+		if (analysis.repeatedPatterns.length > 0) {
+			output += `\n## Repeated Patterns (potential inefficiencies)\n`;
+			for (const { pattern, count, suggestion } of analysis.repeatedPatterns) {
+				output += `- **${pattern}** (${count}x): ${suggestion}\n`;
+			}
+		}
+
+		if (analysis.suggestions.length > 0) {
+			output += `\n## Suggestions\n`;
+			for (const suggestion of analysis.suggestions) {
+				output += `- ${suggestion}\n`;
+			}
+		}
+
+		if (result.data?.rawContent) {
+			output += `\n## Raw Log Content\n\`\`\`\n${result.data.rawContent}\n\`\`\`\n`;
+		}
 
 		return output;
 	},
