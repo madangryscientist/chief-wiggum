@@ -340,7 +340,7 @@ const stop = tool({
 
 const summary = tool({
 	description:
-		"Analyze ALL current log files from the chief-wiggum logs folder. Returns structured analysis including: iterations count, tasks completed, common errors, repeated patterns, and suggestions for prompt improvements. Use archive_logs to move old logs to archive before starting fresh.",
+		"Analyze ALL current log files from the chief-wiggum logs folder. Returns detailed analysis including: iteration stats, tasks completed/started, tool usage, errors, repeated patterns, and actionable suggestions for prompt improvements. Use archive_logs to move old logs to archive before starting fresh.",
 	args: {
 		raw: tool.schema
 			.boolean()
@@ -356,10 +356,26 @@ const summary = tool({
 			analysis: {
 				iterations: number;
 				totalDuration: string;
+				totalDurationSeconds: number;
+				avgIterationSeconds: number;
 				tasksCompleted: string[];
-				errors: Array<{ error: string; count: number }>;
+				tasksStarted: string[];
+				toolUsage: Record<string, number>;
+				totalToolCalls: number;
+				errors: Array<{ error: string; count: number; firstSeen: string }>;
 				repeatedPatterns: Array<{ pattern: string; count: number; suggestion: string }>;
 				suggestions: string[];
+				iterationDetails: Array<{
+					number: number;
+					duration: string;
+					tools: Record<string, number>;
+					exitCode: number | null;
+					completed: boolean;
+					taskId: string | null;
+				}>;
+				filesModified: string[];
+				completionRate: number;
+				avgToolsPerIteration: number;
 			};
 			rawContent?: string;
 			error?: string;
@@ -373,44 +389,97 @@ const summary = tool({
 			return `Error: ${result.data.error}`;
 		}
 
-		const analysis = result.data?.analysis;
-		if (!analysis) {
+		const a = result.data?.analysis;
+		if (!a) {
 			return "No analysis available";
 		}
 
-		let output = `# Log Analysis Summary\n\n`;
-		output += `**Files:** ${result.data?.fileCount} (${result.data?.files?.join(", ")})\n`;
-		output += `**Iterations:** ${analysis.iterations}\n`;
-		output += `**Total Duration:** ${analysis.totalDuration}\n`;
+		let output = `# Chief Wiggum Log Analysis\n\n`;
+		
+		// Overview stats
+		output += `## Overview\n`;
+		output += `| Metric | Value |\n`;
+		output += `|--------|-------|\n`;
+		output += `| Log Files | ${result.data?.fileCount} |\n`;
+		output += `| Total Iterations | ${a.iterations} |\n`;
+		output += `| Total Duration | ${a.totalDuration} (${Math.round(a.totalDurationSeconds / 60)} min) |\n`;
+		output += `| Avg Iteration | ${Math.round(a.avgIterationSeconds / 60)}m ${a.avgIterationSeconds % 60}s |\n`;
+		output += `| Completion Rate | ${a.completionRate}% |\n`;
+		output += `| Total Tool Calls | ${a.totalToolCalls} |\n`;
+		output += `| Avg Tools/Iteration | ${a.avgToolsPerIteration} |\n\n`;
 
-		if (analysis.tasksCompleted.length > 0) {
-			output += `\n## Tasks Completed (${analysis.tasksCompleted.length})\n`;
-			output += analysis.tasksCompleted.join(", ") + "\n";
+		// Tool usage breakdown
+		if (Object.keys(a.toolUsage).length > 0) {
+			output += `## Tool Usage\n`;
+			const sortedTools = Object.entries(a.toolUsage).sort((x, y) => y[1] - x[1]);
+			for (const [tool, count] of sortedTools) {
+				const pct = Math.round((count / a.totalToolCalls) * 100);
+				output += `- **${tool}**: ${count} (${pct}%)\n`;
+			}
+			output += `\n`;
 		}
 
-		if (analysis.errors.length > 0) {
-			output += `\n## Errors Found\n`;
-			for (const { error, count } of analysis.errors) {
-				output += `- (${count}x) ${error}\n`;
+		// Tasks
+		output += `## Tasks\n`;
+		output += `- **Completed (${a.tasksCompleted.length})**: ${a.tasksCompleted.join(", ") || "none"}\n`;
+		if (a.tasksStarted.length > 0) {
+			output += `- **Started but not completed (${a.tasksStarted.length})**: ${a.tasksStarted.join(", ")}\n`;
+		}
+		output += `\n`;
+
+		// Files modified
+		if (a.filesModified.length > 0) {
+			output += `## Files Modified (${a.filesModified.length})\n`;
+			output += a.filesModified.slice(0, 20).join(", ");
+			if (a.filesModified.length > 20) {
+				output += ` ... and ${a.filesModified.length - 20} more`;
+			}
+			output += `\n\n`;
+		}
+
+		// Errors
+		if (a.errors.length > 0) {
+			output += `## Errors (${a.errors.length} unique)\n`;
+			for (const { error, count, firstSeen } of a.errors) {
+				output += `- **(${count}x)** [${firstSeen}] ${error}\n`;
+			}
+			output += `\n`;
+		}
+
+		// Repeated patterns - THE KEY INSIGHTS
+		if (a.repeatedPatterns.length > 0) {
+			output += `## ⚠️ Inefficiency Patterns Detected\n`;
+			output += `These patterns indicate work being repeated unnecessarily. Consider adding to your prompt file:\n\n`;
+			for (const { pattern, count, suggestion } of a.repeatedPatterns) {
+				output += `### ${pattern} (${count}x)\n`;
+				output += `**Suggestion:** ${suggestion}\n\n`;
 			}
 		}
 
-		if (analysis.repeatedPatterns.length > 0) {
-			output += `\n## Repeated Patterns (potential inefficiencies)\n`;
-			for (const { pattern, count, suggestion } of analysis.repeatedPatterns) {
-				output += `- **${pattern}** (${count}x): ${suggestion}\n`;
+		// Actionable suggestions
+		if (a.suggestions.length > 0) {
+			output += `## 📋 Actionable Suggestions for Prompt\n`;
+			for (let i = 0; i < a.suggestions.length; i++) {
+				output += `${i + 1}. ${a.suggestions[i]}\n`;
 			}
+			output += `\n`;
 		}
 
-		if (analysis.suggestions.length > 0) {
-			output += `\n## Suggestions\n`;
-			for (const suggestion of analysis.suggestions) {
-				output += `- ${suggestion}\n`;
+		// Recent iterations detail
+		if (a.iterationDetails.length > 0) {
+			output += `## Recent Iterations (last ${a.iterationDetails.length})\n`;
+			output += `| # | Duration | Tools | Exit | Task |\n`;
+			output += `|---|----------|-------|------|------|\n`;
+			for (const iter of a.iterationDetails.slice(-10)) {
+				const toolStr = Object.entries(iter.tools).map(([t, c]) => `${t}:${c}`).join(" ") || "-";
+				const status = iter.completed ? "✅" : (iter.exitCode === 0 ? "🔄" : "❌");
+				output += `| ${iter.number} | ${iter.duration} | ${toolStr} | ${status} | ${iter.taskId || "-"} |\n`;
 			}
+			output += `\n`;
 		}
 
 		if (result.data?.rawContent) {
-			output += `\n## Raw Log Content\n\`\`\`\n${result.data.rawContent}\n\`\`\`\n`;
+			output += `## Raw Log Content\n\`\`\`\n${result.data.rawContent}\n\`\`\`\n`;
 		}
 
 		return output;
