@@ -2357,52 +2357,84 @@ function startHttpServer(port: number): ReturnType<typeof Bun.serve> {
 						}
 					})();
 				} else if (method === "GET" && path === "/summary") {
-					const logDir = getLogDir();
+					// Returns the CURRENT log file (the one being actively written)
 					const lines = parseInt(url.searchParams.get("lines") || "500", 10);
+					
+					if (!logFilePath || !existsSync(logFilePath)) {
+						response = jsonResponse({
+							error: "No active log file. Start a loop with logging enabled.",
+							active: false,
+						});
+					} else {
+						const content = readFileSync(logFilePath, "utf-8");
+						const allLines = content.split("\n");
+						const totalLines = allLines.length;
+						
+						// Return last N lines
+						const truncated = totalLines > lines;
+						const outputLines = truncated ? allLines.slice(-lines) : allLines;
+
+						response = jsonResponse({
+							file: logFilePath.split("/").pop(),
+							path: logFilePath,
+							totalLines,
+							returnedLines: outputLines.length,
+							truncated,
+							content: outputLines.join("\n"),
+							active: true,
+						});
+					}
+				} else if (method === "GET" && path === "/logs") {
+					// Returns archived log files (not the current one)
+					const logDir = getLogDir();
+					const requestedFile = url.searchParams.get("file");
+					const lines = parseInt(url.searchParams.get("lines") || "1000", 10);
 					
 					if (!existsSync(logDir)) {
 						response = jsonResponse({
-							error: "No log files found",
+							error: "No log directory found",
 							logDir,
 							files: [],
 						});
 					} else {
-						const files = readdirSync(logDir)
+						const allFiles = readdirSync(logDir)
 							.filter((f) => f.endsWith(".log"))
 							.sort()
 							.reverse();
+						
+						// Exclude the current active log file
+						const currentLogName = logFilePath?.split("/").pop();
+						const archivedFiles = allFiles.filter((f) => f !== currentLogName);
 
-						if (files.length === 0) {
+						if (!requestedFile) {
+							// List available archived log files
 							response = jsonResponse({
-								error: "No log files found",
 								logDir,
-								files: [],
+								currentLog: currentLogName || null,
+								archivedFiles,
+								count: archivedFiles.length,
 							});
 						} else {
-							// Get most recent log file by default, or specific file if requested
-							const requestedFile = url.searchParams.get("file");
-							const logFile = requestedFile || files[0];
-							const logPath = join(logDir, logFile);
-
+							// Read specific archived log file
+							const logPath = join(logDir, requestedFile);
+							
 							if (!existsSync(logPath)) {
-								response = jsonResponse({ error: `Log file not found: ${logFile}` }, 404);
+								response = jsonResponse({ error: `Log file not found: ${requestedFile}` }, 404);
 							} else {
 								const content = readFileSync(logPath, "utf-8");
 								const allLines = content.split("\n");
 								const totalLines = allLines.length;
 								
-								// Return last N lines
 								const truncated = totalLines > lines;
 								const outputLines = truncated ? allLines.slice(-lines) : allLines;
 
 								response = jsonResponse({
-									file: logFile,
+									file: requestedFile,
 									path: logPath,
 									totalLines,
 									returnedLines: outputLines.length,
 									truncated,
 									content: outputLines.join("\n"),
-									availableFiles: files.slice(0, 10),
 								});
 							}
 						}
