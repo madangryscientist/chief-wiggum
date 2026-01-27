@@ -1,13 +1,16 @@
 import { describe, expect, test, beforeAll, afterAll } from "bun:test";
 import { existsSync, mkdirSync, readdirSync, readFileSync, rmSync } from "node:fs";
 import { join } from "node:path";
-import { $ } from "bun";
 
 const TEST_WORKSPACE = join(import.meta.dir, ".test-workspace");
 const TEST_RALPH_DIR = join(TEST_WORKSPACE, ".ralph");
 const TEST_LOG_DIR = join(TEST_RALPH_DIR, "logs");
 
-describe("logging integration", () => {
+// Skip in CI - requires opencode and API keys
+const isCI = process.env.CI === "true" || process.env.GITHUB_ACTIONS === "true";
+const describeIntegration = isCI ? describe.skip : describe;
+
+describeIntegration("logging integration", () => {
 	beforeAll(() => {
 		if (existsSync(TEST_WORKSPACE)) {
 			rmSync(TEST_WORKSPACE, { recursive: true });
