@@ -2359,7 +2359,6 @@ function startHttpServer(port: number): ReturnType<typeof Bun.serve> {
 				} else if (method === "GET" && path === "/summary") {
 					// Returns ALL log files in logs/ (not archived)
 					const logDir = getLogDir();
-					const lines = parseInt(url.searchParams.get("lines") || "2000", 10);
 					
 					if (!existsSync(logDir)) {
 						response = jsonResponse({
@@ -2389,20 +2388,10 @@ function startHttpServer(port: number): ReturnType<typeof Bun.serve> {
 								combinedContent += content;
 							}
 
-							const allLines = combinedContent.split("\n");
-							const totalLines = allLines.length;
-							
-							// Return last N lines
-							const truncated = totalLines > lines;
-							const outputLines = truncated ? allLines.slice(-lines) : allLines;
-
 							response = jsonResponse({
 								files: logFiles,
 								fileCount: logFiles.length,
-								totalLines,
-								returnedLines: outputLines.length,
-								truncated,
-								content: outputLines.join("\n"),
+								content: combinedContent,
 							});
 						}
 					}
@@ -2411,7 +2400,6 @@ function startHttpServer(port: number): ReturnType<typeof Bun.serve> {
 					const logDir = getLogDir();
 					const archiveDir = join(logDir, "archive");
 					const requestedFile = url.searchParams.get("file");
-					const lines = parseInt(url.searchParams.get("lines") || "1000", 10);
 					
 					if (!existsSync(archiveDir)) {
 						response = jsonResponse({
@@ -2441,19 +2429,11 @@ function startHttpServer(port: number): ReturnType<typeof Bun.serve> {
 								response = jsonResponse({ error: `Archived log not found: ${requestedFile}` }, 404);
 							} else {
 								const content = readFileSync(logPath, "utf-8");
-								const allLines = content.split("\n");
-								const totalLines = allLines.length;
-								
-								const truncated = totalLines > lines;
-								const outputLines = truncated ? allLines.slice(-lines) : allLines;
 
 								response = jsonResponse({
 									file: requestedFile,
 									path: logPath,
-									totalLines,
-									returnedLines: outputLines.length,
-									truncated,
-									content: outputLines.join("\n"),
+									content,
 								});
 							}
 						}

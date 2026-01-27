@@ -341,28 +341,14 @@ const stop = tool({
 const summary = tool({
 	description:
 		"Get ALL current log files from the chief-wiggum logs folder (not archived). Shows combined output from all active session logs. Use archive_logs to move old logs to archive.",
-	args: {
-		lines: tool.schema
-			.number()
-			.optional()
-			.describe("Number of lines to return from the end (default: 2000)"),
-	},
-	async execute(args) {
-		const params = new URLSearchParams();
-		if (args.lines) params.set("lines", String(args.lines));
-		
-		const queryString = params.toString();
-		const path = queryString ? `/summary?${queryString}` : "/summary";
-		
+	args: {},
+	async execute() {
 		const result = await fetchJson<{
 			files: string[];
 			fileCount: number;
-			totalLines: number;
-			returnedLines: number;
-			truncated: boolean;
 			content: string;
 			error?: string;
-		}>(path);
+		}>("/summary");
 
 		if (result.error) {
 			return `Error: ${result.error}`;
@@ -373,12 +359,7 @@ const summary = tool({
 		}
 
 		let output = `## Log Summary (${result.data?.fileCount} files)\n`;
-		output += `Files: ${result.data?.files?.join(", ")}\n`;
-		output += `Lines: ${result.data?.returnedLines}/${result.data?.totalLines}`;
-		if (result.data?.truncated) {
-			output += ` (truncated, showing last ${result.data.returnedLines} lines)`;
-		}
-		output += `\n\n`;
+		output += `Files: ${result.data?.files?.join(", ")}\n\n`;
 		output += result.data?.content || "No content";
 
 		return output;
@@ -393,18 +374,9 @@ const logs = tool({
 			.string()
 			.optional()
 			.describe("Specific archived log file name to read (omit to list available files)"),
-		lines: tool.schema
-			.number()
-			.optional()
-			.describe("Number of lines to return when reading a file (default: 1000)"),
 	},
 	async execute(args) {
-		const params = new URLSearchParams();
-		if (args.file) params.set("file", args.file);
-		if (args.lines) params.set("lines", String(args.lines));
-		
-		const queryString = params.toString();
-		const path = queryString ? `/logs?${queryString}` : "/logs";
+		const path = args.file ? `/logs?file=${encodeURIComponent(args.file)}` : "/logs";
 		
 		const result = await fetchJson<{
 			archiveDir?: string;
@@ -413,9 +385,6 @@ const logs = tool({
 			message?: string;
 			file?: string;
 			path?: string;
-			totalLines?: number;
-			returnedLines?: number;
-			truncated?: boolean;
 			content?: string;
 			error?: string;
 		}>(path);
@@ -444,12 +413,7 @@ const logs = tool({
 		}
 
 		// If reading a file
-		let output = `## Archived Log: ${result.data?.file}\n`;
-		output += `Lines: ${result.data?.returnedLines}/${result.data?.totalLines}`;
-		if (result.data?.truncated) {
-			output += ` (truncated, showing last ${result.data.returnedLines} lines)`;
-		}
-		output += `\n\n`;
+		let output = `## Archived Log: ${result.data?.file}\n\n`;
 		output += result.data?.content || "No content";
 
 		return output;
