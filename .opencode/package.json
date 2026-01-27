@@ -2,7 +2,7 @@
 	"name": "chief-wiggum-opencode",
 	"private": true,
 	"dependencies": {
-		"@opencode-ai/plugin": "latest",
+		"@opencode-ai/plugin": "1.1.30",
 		"zod": "^3.24.0"
 	}
 }
