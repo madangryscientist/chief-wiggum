@@ -1,4 +1,4 @@
-import { type Plugin, tool } from "@opencode-ai/plugin";
+import { tool } from "@opencode-ai/plugin";
 
 const DEFAULT_SERVER_URL = "http://localhost:3456";
 
@@ -43,7 +43,7 @@ async function fetchJson<T>(
 	}
 }
 
-export const status = tool({
+const status = tool({
 	description:
 		"Get the current status of the chief-wiggum loop, including active state, iteration count, and history",
 	args: {},
@@ -73,7 +73,7 @@ export const status = tool({
 	},
 });
 
-export const start_loop = tool({
+const start_loop = tool({
 	description:
 		"Start a new chief-wiggum iteration loop. Returns the prompt for the first iteration.",
 	args: {
@@ -132,7 +132,7 @@ export const start_loop = tool({
 	},
 });
 
-export const complete_iteration = tool({
+const complete_iteration = tool({
 	description:
 		"Record the completion of the current iteration. Returns the next action (continue, complete, or stop) and the prompt for the next iteration if continuing.",
 	args: {
@@ -203,7 +203,7 @@ export const complete_iteration = tool({
 	},
 });
 
-export const next_task = tool({
+const next_task = tool({
 	description:
 		"Get the next available task from the task list. Returns the task details or indicates if all tasks are complete.",
 	args: {},
@@ -253,7 +253,7 @@ export const next_task = tool({
 	},
 });
 
-export const get_context = tool({
+const get_context = tool({
 	description:
 		"Get any pending context that was injected into the loop. The context is cleared after being retrieved.",
 	args: {},
@@ -276,7 +276,7 @@ export const get_context = tool({
 	},
 });
 
-export const mark_task = tool({
+const mark_task = tool({
 	description:
 		"Mark a task's status in the structured tasks file. Use this to mark tasks as in-progress, complete, or todo.",
 	args: {
@@ -312,7 +312,7 @@ export const mark_task = tool({
 	},
 });
 
-export const stop = tool({
+const stop = tool({
 	description:
 		"Stop the current chief-wiggum loop. The loop will end after the current iteration.",
 	args: {},
@@ -338,9 +338,8 @@ export const stop = tool({
 	},
 });
 
-export default {
-	name: "chief-wiggum",
-	tools: {
+export const ChiefWiggumPlugin = async () => ({
+	tool: {
 		status,
 		start_loop,
 		complete_iteration,
@@ -349,4 +348,4 @@ export default {
 		mark_task,
 		stop,
 	},
-} satisfies Plugin;
+});

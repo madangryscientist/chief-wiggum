@@ -1,4 +1,4 @@
-import { type Plugin, tool } from "@opencode-ai/plugin";
+import { tool } from "@opencode-ai/plugin";
 
 const DEFAULT_SERVER_URL = "http://localhost:3456";
 
@@ -43,7 +43,7 @@ async function fetchJson<T>(
 	}
 }
 
-export const loop_status = tool({
+const loop_status = tool({
 	description:
 		"Get the current status of the chief-wiggum loop. Use this to check if a loop is active and its progress.",
 	args: {},
@@ -128,7 +128,7 @@ export const loop_status = tool({
 	},
 });
 
-export const inject_context = tool({
+const inject_context = tool({
 	description:
 		"Inject context into the running loop. The subagent will receive this on its next get_context call.",
 	args: {
@@ -155,7 +155,7 @@ export const inject_context = tool({
 	},
 });
 
-export const stop_loop = tool({
+const stop_loop = tool({
 	description:
 		"Stop the current chief-wiggum loop. The loop will end after the current iteration.",
 	args: {},
@@ -181,7 +181,7 @@ export const stop_loop = tool({
 	},
 });
 
-export const list_tasks = tool({
+const list_tasks = tool({
 	description:
 		"List all tasks from the structured tasks file with their current status.",
 	args: {},
@@ -228,7 +228,7 @@ export const list_tasks = tool({
 	},
 });
 
-export const summarize_loop = tool({
+const summarize_loop = tool({
 	description:
 		"Get a summary of the loop history including iterations, time spent, and any errors.",
 	args: {},
@@ -344,7 +344,7 @@ export const summarize_loop = tool({
 	},
 });
 
-export const health_check = tool({
+const health_check = tool({
 	description: "Check if the chief-wiggum server is running and healthy.",
 	args: {},
 	async execute() {
@@ -368,9 +368,8 @@ export const health_check = tool({
 	},
 });
 
-export default {
-	name: "chief-wiggum-observer",
-	tools: {
+export const ChiefWiggumObserverPlugin = async () => ({
+	tool: {
 		loop_status,
 		inject_context,
 		stop_loop,
@@ -378,4 +377,4 @@ export default {
 		summarize_loop,
 		health_check,
 	},
-} satisfies Plugin;
+});
