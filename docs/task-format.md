@@ -9,7 +9,9 @@ Quick reference for AI agents generating task files.
 | Tasks file | `docs/tasks.md` | Structured task list with milestones |
 | Prompt file | `docs/prompt.md` | Overall goal/context for the loop |
 
-Override with: `chief-wiggum serve -t path/to/tasks.md`
+These are auto-detected. Just run `chief-wiggum run` if both files exist.
+
+Override with: `chief-wiggum run -f path/to/prompt.md -t path/to/tasks.md`
 
 ## Prompt File
 
