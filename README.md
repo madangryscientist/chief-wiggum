@@ -201,24 +201,28 @@ export CHIEF_WIGGUM_SERVER_URL=http://localhost:3456
 
 ## Structured Tasks Format
 
+Tasks file location: `docs/tasks.md` (default)
+
 ```markdown
 # Project Tasks
 
 ## M1: Setup
 
-- [x] `m1-001` Create project structure
+- [x] m1-01: Create project structure
   - verify: `ls -la src/`
   - completed: 2026-01-24T10:05:00Z
 
-- [ ] `m1-002` Initialize npm
-  - depends: m1-001
+- [ ] m1-02: Initialize npm
+  - depends: m1-01
   - verify: `cat package.json`
 
 ## M2: Implementation
 
-- [ ] `m2-001` Add authentication
-  - depends: m1-002
+- [ ] m2-01: Add authentication
+  - depends: m1-02
 ```
+
+See [docs/task-format.md](docs/task-format.md) for full format reference.
 
 ## WebSocket Events
 

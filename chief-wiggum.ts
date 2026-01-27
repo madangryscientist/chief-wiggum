@@ -422,16 +422,21 @@ chief-wiggum run - Start the Ralph loop
 
 Usage:
   chief-wiggum run [options] [prompt]
+  chief-wiggum run                     # Uses docs/prompt.md and docs/tasks.md
   chief-wiggum -f <file> [options]
 
+Defaults:
+  If no prompt is provided, looks for docs/prompt.md
+  If no tasks file is provided, looks for docs/tasks.md
+
 Core Options:
-  -f, --prompt <file>     Prompt file path
+  -f, --prompt <file>     Prompt file path (default: docs/prompt.md)
   -n, --iterations <n>    Max iterations (0=unlimited, default: 0)
   -m, --model <name>      Model to use (default: anthropic/claude-sonnet-4-5)
   -a, --agent <type>      Agent: opencode (default), claude-code, codex
 
 Tasks:
-  -t, --tasks-file <path> Structured tasks file (e.g., docs/tasks.md)  
+  -t, --tasks-file <path> Structured tasks file (default: docs/tasks.md)
   -M, --milestone <name>  Filter by milestone (e.g., M2b)
   --done <phrase>         Completion promise (default: COMPLETE)
   --next <phrase>         Task promise (default: READY_FOR_NEXT_TASK)
@@ -452,6 +457,7 @@ Behavior:
   --log                   Log output to .ralph/logs/
 
 Examples:
+  chief-wiggum run                                    # Uses defaults
   chief-wiggum run -f prompt.md -t docs/tasks.md -M M2b -n 50
   chief-wiggum run "Fix the auth bug" --timeout 15
   chief-wiggum run -f prompt.md --force --log
@@ -2434,12 +2440,30 @@ async function cmdRun(
 		} else {
 			opts.prompt = args.join(" ");
 		}
+	} else {
+		// Try default prompt file
+		const defaultPromptFile = "docs/prompt.md";
+		if (existsSync(defaultPromptFile)) {
+			opts.promptFile = defaultPromptFile;
+			opts.prompt = readFileSync(defaultPromptFile, "utf-8");
+		}
+	}
+
+	// Try default tasks file if not specified
+	if (!opts.tasksFile) {
+		const defaultTasksFile = "docs/tasks.md";
+		if (existsSync(defaultTasksFile)) {
+			opts.tasksFile = defaultTasksFile;
+			structuredTasksFile = defaultTasksFile;
+		}
 	}
 
 	if (!opts.prompt) {
 		console.error("Error: No prompt provided");
 		console.error("Usage: chief-wiggum run -f <file> [options]");
 		console.error("       chief-wiggum run <prompt> [options]");
+		console.error("");
+		console.error("Or create docs/prompt.md and docs/tasks.md for defaults");
 		process.exit(1);
 	}
 
