@@ -2668,7 +2668,8 @@ async function cmdRun(
 		}
 
 		const iterInfo = opts.iterations > 0 ? ` / ${opts.iterations}` : "";
-		console.log(`\n🔄 Iteration ${state.iteration}${iterInfo}`);
+		const totalElapsed = formatDuration(Date.now() - new Date(state.startedAt).getTime());
+		console.log(`\n🔄 Iteration ${state.iteration}${iterInfo} (${totalElapsed})`);
 
 		if (structuredTasksFile) {
 			const summary = getStructuredTasksSummary(milestoneFilter);
