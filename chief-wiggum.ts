@@ -2357,38 +2357,9 @@ function startHttpServer(port: number): ReturnType<typeof Bun.serve> {
 						}
 					})();
 				} else if (method === "GET" && path === "/summary") {
-					// Returns the CURRENT log file (the one being actively written)
-					const lines = parseInt(url.searchParams.get("lines") || "500", 10);
-					
-					if (!logFilePath || !existsSync(logFilePath)) {
-						response = jsonResponse({
-							error: "No active log file. Start a loop with logging enabled.",
-							active: false,
-						});
-					} else {
-						const content = readFileSync(logFilePath, "utf-8");
-						const allLines = content.split("\n");
-						const totalLines = allLines.length;
-						
-						// Return last N lines
-						const truncated = totalLines > lines;
-						const outputLines = truncated ? allLines.slice(-lines) : allLines;
-
-						response = jsonResponse({
-							file: logFilePath.split("/").pop(),
-							path: logFilePath,
-							totalLines,
-							returnedLines: outputLines.length,
-							truncated,
-							content: outputLines.join("\n"),
-							active: true,
-						});
-					}
-				} else if (method === "GET" && path === "/logs") {
-					// Returns archived log files (not the current one)
+					// Returns ALL log files in logs/ (not archived)
 					const logDir = getLogDir();
-					const requestedFile = url.searchParams.get("file");
-					const lines = parseInt(url.searchParams.get("lines") || "1000", 10);
+					const lines = parseInt(url.searchParams.get("lines") || "2000", 10);
 					
 					if (!existsSync(logDir)) {
 						response = jsonResponse({
@@ -2397,29 +2368,77 @@ function startHttpServer(port: number): ReturnType<typeof Bun.serve> {
 							files: [],
 						});
 					} else {
-						const allFiles = readdirSync(logDir)
+						const logFiles = readdirSync(logDir)
+							.filter((f) => f.endsWith(".log"))
+							.sort(); // oldest first for concatenation
+
+						if (logFiles.length === 0) {
+							response = jsonResponse({
+								error: "No log files found. Start a loop with logging enabled.",
+								logDir,
+								files: [],
+							});
+						} else {
+							// Concatenate all log files
+							let combinedContent = "";
+							for (const file of logFiles) {
+								const content = readFileSync(join(logDir, file), "utf-8");
+								combinedContent += `\n${"=".repeat(60)}\n`;
+								combinedContent += `LOG FILE: ${file}\n`;
+								combinedContent += `${"=".repeat(60)}\n`;
+								combinedContent += content;
+							}
+
+							const allLines = combinedContent.split("\n");
+							const totalLines = allLines.length;
+							
+							// Return last N lines
+							const truncated = totalLines > lines;
+							const outputLines = truncated ? allLines.slice(-lines) : allLines;
+
+							response = jsonResponse({
+								files: logFiles,
+								fileCount: logFiles.length,
+								totalLines,
+								returnedLines: outputLines.length,
+								truncated,
+								content: outputLines.join("\n"),
+							});
+						}
+					}
+				} else if (method === "GET" && path === "/logs") {
+					// Returns archived log files from logs/archive/
+					const logDir = getLogDir();
+					const archiveDir = join(logDir, "archive");
+					const requestedFile = url.searchParams.get("file");
+					const lines = parseInt(url.searchParams.get("lines") || "1000", 10);
+					
+					if (!existsSync(archiveDir)) {
+						response = jsonResponse({
+							archiveDir,
+							archivedFiles: [],
+							count: 0,
+							message: "No archived logs. Use POST /logs/archive to archive current logs.",
+						});
+					} else {
+						const archivedFiles = readdirSync(archiveDir)
 							.filter((f) => f.endsWith(".log"))
 							.sort()
 							.reverse();
-						
-						// Exclude the current active log file
-						const currentLogName = logFilePath?.split("/").pop();
-						const archivedFiles = allFiles.filter((f) => f !== currentLogName);
 
 						if (!requestedFile) {
 							// List available archived log files
 							response = jsonResponse({
-								logDir,
-								currentLog: currentLogName || null,
+								archiveDir,
 								archivedFiles,
 								count: archivedFiles.length,
 							});
 						} else {
 							// Read specific archived log file
-							const logPath = join(logDir, requestedFile);
+							const logPath = join(archiveDir, requestedFile);
 							
 							if (!existsSync(logPath)) {
-								response = jsonResponse({ error: `Log file not found: ${requestedFile}` }, 404);
+								response = jsonResponse({ error: `Archived log not found: ${requestedFile}` }, 404);
 							} else {
 								const content = readFileSync(logPath, "utf-8");
 								const allLines = content.split("\n");
@@ -2437,6 +2456,60 @@ function startHttpServer(port: number): ReturnType<typeof Bun.serve> {
 									content: outputLines.join("\n"),
 								});
 							}
+						}
+					}
+				} else if (method === "POST" && path === "/logs/archive") {
+					// Move all current logs to archive folder
+					const logDir = getLogDir();
+					const archiveDir = join(logDir, "archive");
+					
+					if (!existsSync(logDir)) {
+						response = jsonResponse({ error: "No log directory found" }, 404);
+					} else {
+						const logFiles = readdirSync(logDir)
+							.filter((f) => f.endsWith(".log"));
+
+						if (logFiles.length === 0) {
+							response = jsonResponse({
+								archived: [],
+								count: 0,
+								message: "No log files to archive",
+							});
+						} else {
+							// Create archive directory if needed
+							if (!existsSync(archiveDir)) {
+								mkdirSync(archiveDir, { recursive: true });
+							}
+
+							const archived: string[] = [];
+							const skipped: string[] = [];
+
+							for (const file of logFiles) {
+								const srcPath = join(logDir, file);
+								const destPath = join(archiveDir, file);
+								
+								// Skip the currently active log file
+								if (srcPath === logFilePath) {
+									skipped.push(file);
+									continue;
+								}
+
+								try {
+									copyFileSync(srcPath, destPath);
+									unlinkSync(srcPath);
+									archived.push(file);
+								} catch (err) {
+									skipped.push(file);
+								}
+							}
+
+							response = jsonResponse({
+								archived,
+								skipped,
+								archivedCount: archived.length,
+								skippedCount: skipped.length,
+								archiveDir,
+							});
 						}
 					}
 				} else if (method === "POST" && path === "/stop") {

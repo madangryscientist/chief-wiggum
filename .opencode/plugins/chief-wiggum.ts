@@ -340,12 +340,12 @@ const stop = tool({
 
 const summary = tool({
 	description:
-		"Get the CURRENT/ACTIVE log output from the running chief-wiggum loop. Shows what the loop has done so far in this session. For archived/past logs, use the 'logs' tool instead.",
+		"Get ALL current log files from the chief-wiggum logs folder (not archived). Shows combined output from all active session logs. Use archive_logs to move old logs to archive.",
 	args: {
 		lines: tool.schema
 			.number()
 			.optional()
-			.describe("Number of lines to return from the end of the log (default: 500)"),
+			.describe("Number of lines to return from the end (default: 2000)"),
 	},
 	async execute(args) {
 		const params = new URLSearchParams();
@@ -355,13 +355,12 @@ const summary = tool({
 		const path = queryString ? `/summary?${queryString}` : "/summary";
 		
 		const result = await fetchJson<{
-			file: string;
-			path: string;
+			files: string[];
+			fileCount: number;
 			totalLines: number;
 			returnedLines: number;
 			truncated: boolean;
 			content: string;
-			active: boolean;
 			error?: string;
 		}>(path);
 
@@ -373,7 +372,8 @@ const summary = tool({
 			return `Error: ${result.data.error}`;
 		}
 
-		let output = `## Current Log: ${result.data?.file}\n`;
+		let output = `## Log Summary (${result.data?.fileCount} files)\n`;
+		output += `Files: ${result.data?.files?.join(", ")}\n`;
 		output += `Lines: ${result.data?.returnedLines}/${result.data?.totalLines}`;
 		if (result.data?.truncated) {
 			output += ` (truncated, showing last ${result.data.returnedLines} lines)`;
@@ -387,7 +387,7 @@ const summary = tool({
 
 const logs = tool({
 	description:
-		"List or read ARCHIVED log files from previous chief-wiggum sessions. Use without arguments to list available log files, or specify a file name to read its contents.",
+		"List or read ARCHIVED log files from logs/archive/. Use without arguments to list available archived files, or specify a file name to read its contents.",
 	args: {
 		file: tool.schema
 			.string()
@@ -407,12 +407,10 @@ const logs = tool({
 		const path = queryString ? `/logs?${queryString}` : "/logs";
 		
 		const result = await fetchJson<{
-			// List response
-			logDir?: string;
-			currentLog?: string | null;
+			archiveDir?: string;
 			archivedFiles?: string[];
 			count?: number;
-			// File read response
+			message?: string;
 			file?: string;
 			path?: string;
 			totalLines?: number;
@@ -433,12 +431,10 @@ const logs = tool({
 		// If listing files
 		if (result.data?.archivedFiles !== undefined) {
 			if (result.data.archivedFiles.length === 0) {
-				return "No archived log files found.";
+				return result.data.message || "No archived log files found. Use archive_logs to archive current logs.";
 			}
 			let output = `## Archived Log Files (${result.data.count})\n\n`;
-			if (result.data.currentLog) {
-				output += `Current active log: ${result.data.currentLog}\n\n`;
-			}
+			output += `Archive directory: ${result.data.archiveDir}\n\n`;
 			output += `Available archives:\n`;
 			for (const file of result.data.archivedFiles) {
 				output += `- ${file}\n`;
@@ -460,11 +456,62 @@ const logs = tool({
 	},
 });
 
+const archive_logs = tool({
+	description:
+		"Move all current log files to the archive folder (logs/archive/). The currently active log file will be skipped. Use this to clean up old logs while preserving them for future reference.",
+	args: {},
+	async execute() {
+		const result = await fetchJson<{
+			archived: string[];
+			skipped: string[];
+			archivedCount: number;
+			skippedCount: number;
+			archiveDir: string;
+			error?: string;
+			message?: string;
+		}>("/logs/archive", {
+			method: "POST",
+		});
+
+		if (result.error) {
+			return `Error: ${result.error}`;
+		}
+
+		if (result.data?.error) {
+			return `Error: ${result.data.error}`;
+		}
+
+		if (result.data?.message) {
+			return result.data.message;
+		}
+
+		let output = `## Logs Archived\n\n`;
+		output += `Archived ${result.data?.archivedCount} file(s) to ${result.data?.archiveDir}\n`;
+		
+		if (result.data?.archived && result.data.archived.length > 0) {
+			output += `\nArchived files:\n`;
+			for (const file of result.data.archived) {
+				output += `- ${file}\n`;
+			}
+		}
+
+		if (result.data?.skipped && result.data.skipped.length > 0) {
+			output += `\nSkipped (active or error):\n`;
+			for (const file of result.data.skipped) {
+				output += `- ${file}\n`;
+			}
+		}
+
+		return output;
+	},
+});
+
 export const ChiefWiggumPlugin = async () => ({
 	tool: {
 		status,
 		summary,
 		logs,
+		archive_logs,
 		start_loop,
 		complete_iteration,
 		next_task,
