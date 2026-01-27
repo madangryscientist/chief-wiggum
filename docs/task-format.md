@@ -2,11 +2,35 @@
 
 Quick reference for AI agents generating task files.
 
-## File Location
+## File Locations
 
-Save tasks to `docs/tasks.md` in the project root (this is the default location).
+| File | Default Path | Purpose |
+|------|--------------|---------|
+| Tasks file | `docs/tasks.md` | Structured task list with milestones |
+| Prompt file | `docs/prompt.md` | Overall goal/context for the loop |
 
-Or specify a custom path when running: `chief-wiggum serve -t path/to/tasks.md`
+Override with: `chief-wiggum serve -t path/to/tasks.md`
+
+## Prompt File
+
+The prompt file contains the high-level goal and context. It's injected as "Your Main Goal" in each iteration.
+
+```markdown
+# Feature Name
+
+Implement [feature description].
+
+## Context
+- Relevant background info
+- Tech stack details
+- Constraints or requirements
+
+## Acceptance Criteria
+- [ ] Criterion 1
+- [ ] Criterion 2
+```
+
+Keep it concise - the tasks file handles the detailed breakdown.
 
 ## Task Line Format
 
