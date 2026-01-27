@@ -1605,6 +1605,7 @@ async function streamProcessOutput(
 		iterationStart: number;
 		agent: AgentConfig;
 		inactivityTimeoutMs: number;
+		logLine?: (line: string) => void;
 	},
 ): Promise<{
 	stdoutText: string;
@@ -1620,6 +1621,16 @@ async function streamProcessOutput(
 	let lastToolSummaryAt = 0;
 	let timedOut = false;
 
+	const log = (line: string) => {
+		console.log(line);
+		options.logLine?.(line + "\n");
+	};
+
+	const logErr = (line: string) => {
+		console.error(line);
+		options.logLine?.(line + "\n");
+	};
+
 	const maybePrintToolSummary = (force = false) => {
 		if (!options.compactTools || toolCounts.size === 0) return;
 		const now = Date.now();
@@ -1627,7 +1638,7 @@ async function streamProcessOutput(
 			return;
 		const summary = formatToolSummary(toolCounts);
 		if (summary) {
-			console.log(`| Tools    ${summary}`);
+			log(`| Tools    ${summary}`);
 			lastPrintedAt = Date.now();
 			lastToolSummaryAt = Date.now();
 		}
@@ -1644,12 +1655,12 @@ async function streamProcessOutput(
 			}
 		}
 		if (line.length === 0) {
-			console.log("");
+			log("");
 			lastPrintedAt = Date.now();
 			return;
 		}
-		if (isError) console.error(line);
-		else console.log(line);
+		if (isError) logErr(line);
+		else log(line);
 		lastPrintedAt = Date.now();
 	};
 
@@ -1726,19 +1737,19 @@ async function streamProcessOutput(
 			killAttempts++;
 
 			if (killAttempts === 1) {
-				console.log(
+				log(
 					`\n⏰ INACTIVITY TIMEOUT: No output for ${formatDuration(inactivityDuration)}. Sending SIGTERM...`,
 				);
 				try {
 					proc.kill("SIGTERM");
 				} catch {}
 			} else if (killAttempts === 2) {
-				console.log(`⏰ Process didn't respond to SIGTERM. Sending SIGKILL...`);
+				log(`⏰ Process didn't respond to SIGTERM. Sending SIGKILL...`);
 				try {
 					proc.kill("SIGKILL");
 				} catch {}
 			} else if (killAttempts === 3) {
-				console.log(`⏰ Killing process tree (PID: ${proc.pid})...`);
+				log(`⏰ Killing process tree (PID: ${proc.pid})...`);
 				await killProcessTree(proc.pid);
 			} else if (killAttempts >= 4) {
 				// Force exit - the streams are stuck
@@ -1754,7 +1765,7 @@ async function streamProcessOutput(
 				options.inactivityTimeoutMs > 0
 					? ` · timeout in ${formatDuration(options.inactivityTimeoutMs - inactivityDuration)}`
 					: "";
-			console.log(
+			log(
 				`⏳ working... elapsed ${elapsed} · last activity ${sinceActivity} ago${timeoutIn}`,
 			);
 			lastPrintedAt = now;
@@ -1786,7 +1797,7 @@ async function streamProcessOutput(
 
 	// If we force-exited, make one more attempt to clean up
 	if (forceExit) {
-		console.log(`⏰ Force-exiting stream readers after timeout`);
+		log(`⏰ Force-exiting stream readers after timeout`);
 		await killProcessTree(proc.pid);
 	}
 
@@ -2719,6 +2730,7 @@ async function cmdRun(
 
 			if (!opts.quiet) {
 				console.log("⏳ Starting agent...");
+				appendToLog("⏳ Starting agent...\n");
 				const streamed = await streamProcessOutput(currentProc, {
 					compactTools: !opts.verbose,
 					toolSummaryIntervalMs: 3000,
@@ -2726,6 +2738,7 @@ async function cmdRun(
 					iterationStart,
 					agent: agentConfig,
 					inactivityTimeoutMs: opts.timeout * 60 * 1000,
+					logLine: appendToLog,
 				});
 				result = streamed.stdoutText;
 				stderr = streamed.stderrText;
@@ -2745,9 +2758,9 @@ async function cmdRun(
 			currentProc = null;
 
 			if (timedOut) {
-				console.log(
-					`\n⚠️  Process killed due to inactivity timeout (${opts.timeout} minutes)`,
-				);
+				const timeoutMsg = `\n⚠️  Process killed due to inactivity timeout (${opts.timeout} minutes)`;
+				console.log(timeoutMsg);
+				appendToLog(timeoutMsg + "\n");
 			}
 
 			const combinedOutput = `${result}\n${stderr}`;
@@ -2759,10 +2772,6 @@ async function cmdRun(
 				`<promise>\\s*${escapeRegex(opts.next)}\\s*</promise>`,
 				"i",
 			).test(combinedOutput);
-
-			// Log agent output
-			appendToLog(result);
-			if (stderr.trim()) appendToLog(`\n[stderr]\n${stderr}`);
 
 			// Parse suggested tasks
 			const suggestedTasks = parseSuggestedTasks(combinedOutput);
