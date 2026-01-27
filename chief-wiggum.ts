@@ -8,6 +8,7 @@
  */
 
 import {
+	appendFileSync,
 	copyFileSync,
 	existsSync,
 	mkdirSync,
@@ -1371,6 +1372,11 @@ Tasks File:   ${structuredTasksFile || "N/A"}
 	);
 }
 
+function appendToLog(text: string): void {
+	if (!logFilePath) return;
+	appendFileSync(logFilePath, text);
+}
+
 // ============================================================================
 // Suggested tasks
 // ============================================================================
@@ -2670,16 +2676,19 @@ async function cmdRun(
 
 		const iterInfo = opts.iterations > 0 ? ` / ${opts.iterations}` : "";
 		const totalElapsed = formatDuration(Date.now() - new Date(state.startedAt).getTime());
-		console.log(`\n🔄 Iteration ${state.iteration}${iterInfo} (${totalElapsed})`);
+		const iterHeader = `\n🔄 Iteration ${state.iteration}${iterInfo} (${totalElapsed})`;
+		console.log(iterHeader);
+		appendToLog(iterHeader + "\n");
 
 		if (structuredTasksFile) {
 			const summary = getStructuredTasksSummary(milestoneFilter);
 			const nextTask = getNextStructuredTask(milestoneFilter);
-			console.log(
-				`   Tasks: ${summary.completed}/${summary.total} | Next: ${nextTask?.id || "NONE"}`,
-			);
+			const taskLine = `   Tasks: ${summary.completed}/${summary.total} | Next: ${nextTask?.id || "NONE"}`;
+			console.log(taskLine);
+			appendToLog(taskLine + "\n");
 		}
 		console.log("─".repeat(68));
+		appendToLog("─".repeat(68) + "\n");
 
 		const contextAtStart = loadContext();
 		const snapshotBefore = await captureFileSnapshot();
@@ -2751,6 +2760,10 @@ async function cmdRun(
 				"i",
 			).test(combinedOutput);
 
+			// Log agent output
+			appendToLog(result);
+			if (stderr.trim()) appendToLog(`\n[stderr]\n${stderr}`);
+
 			// Parse suggested tasks
 			const suggestedTasks = parseSuggestedTasks(combinedOutput);
 			if (suggestedTasks.length > 0)
@@ -2759,15 +2772,17 @@ async function cmdRun(
 			const iterationDuration = Date.now() - iterationStart;
 
 			// Print summary
-			console.log("\nIteration Summary");
-			console.log("─".repeat(68));
-			console.log(`Iteration: ${state.iteration}`);
-			console.log(`Elapsed:   ${formatDuration(iterationDuration)}`);
-			console.log(`Tools:     ${formatToolSummary(toolCounts) || "none"}`);
-			console.log(`Exit code: ${exitCode}`);
-			console.log(
-				`Completion: ${completionDetected ? "detected" : "not detected"}`,
-			);
+			const iterSummary = `
+Iteration Summary
+${"─".repeat(68)}
+Iteration: ${state.iteration}
+Elapsed:   ${formatDuration(iterationDuration)}
+Tools:     ${formatToolSummary(toolCounts) || "none"}
+Exit code: ${exitCode}
+Completion: ${completionDetected ? "detected" : "not detected"}
+`;
+			console.log(iterSummary);
+			appendToLog(iterSummary);
 
 			// Track history
 			const snapshotAfter = await captureFileSnapshot();
