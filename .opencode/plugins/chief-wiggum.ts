@@ -1,4 +1,4 @@
-import { type Plugin, tool } from "@opencode-ai/plugin";
+import { tool } from "@opencode-ai/plugin";
 
 const DEFAULT_SERVER_URL = "http://localhost:3456";
 
@@ -338,9 +338,9 @@ const stop = tool({
 	},
 });
 
-export default {
-	name: "chief-wiggum",
-	tools: {
+export const ChiefWiggumPlugin = async () => ({
+	
+	tool: {
 		status,
 		start_loop,
 		complete_iteration,
@@ -349,4 +349,4 @@ export default {
 		mark_task,
 		stop,
 	},
-} satisfies Plugin;
+});
