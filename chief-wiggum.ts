@@ -13,6 +13,7 @@ import {
 	existsSync,
 	mkdirSync,
 	readFileSync,
+	readdirSync,
 	unlinkSync,
 	writeFileSync,
 } from "node:fs";
@@ -2355,6 +2356,57 @@ function startHttpServer(port: number): ReturnType<typeof Bun.serve> {
 							);
 						}
 					})();
+				} else if (method === "GET" && path === "/summary") {
+					const logDir = getLogDir();
+					const lines = parseInt(url.searchParams.get("lines") || "500", 10);
+					
+					if (!existsSync(logDir)) {
+						response = jsonResponse({
+							error: "No log files found",
+							logDir,
+							files: [],
+						});
+					} else {
+						const files = readdirSync(logDir)
+							.filter((f) => f.endsWith(".log"))
+							.sort()
+							.reverse();
+
+						if (files.length === 0) {
+							response = jsonResponse({
+								error: "No log files found",
+								logDir,
+								files: [],
+							});
+						} else {
+							// Get most recent log file by default, or specific file if requested
+							const requestedFile = url.searchParams.get("file");
+							const logFile = requestedFile || files[0];
+							const logPath = join(logDir, logFile);
+
+							if (!existsSync(logPath)) {
+								response = jsonResponse({ error: `Log file not found: ${logFile}` }, 404);
+							} else {
+								const content = readFileSync(logPath, "utf-8");
+								const allLines = content.split("\n");
+								const totalLines = allLines.length;
+								
+								// Return last N lines
+								const truncated = totalLines > lines;
+								const outputLines = truncated ? allLines.slice(-lines) : allLines;
+
+								response = jsonResponse({
+									file: logFile,
+									path: logPath,
+									totalLines,
+									returnedLines: outputLines.length,
+									truncated,
+									content: outputLines.join("\n"),
+									availableFiles: files.slice(0, 10),
+								});
+							}
+						}
+					}
 				} else if (method === "POST" && path === "/stop") {
 					const state = loadState();
 					if (state?.active) {

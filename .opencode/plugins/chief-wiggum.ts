@@ -338,10 +338,66 @@ const stop = tool({
 	},
 });
 
+const summary = tool({
+	description:
+		"Get the log output from the chief-wiggum loop. Returns the most recent log file content showing what work has been done, including agent output, tool usage, and iteration summaries.",
+	args: {
+		lines: tool.schema
+			.number()
+			.optional()
+			.describe("Number of lines to return from the end of the log (default: 500)"),
+		file: tool.schema
+			.string()
+			.optional()
+			.describe("Specific log file name to read (default: most recent)"),
+	},
+	async execute(args) {
+		const params = new URLSearchParams();
+		if (args.lines) params.set("lines", String(args.lines));
+		if (args.file) params.set("file", args.file);
+		
+		const queryString = params.toString();
+		const path = queryString ? `/summary?${queryString}` : "/summary";
+		
+		const result = await fetchJson<{
+			file: string;
+			path: string;
+			totalLines: number;
+			returnedLines: number;
+			truncated: boolean;
+			content: string;
+			availableFiles: string[];
+			error?: string;
+		}>(path);
+
+		if (result.error) {
+			return `Error: ${result.error}`;
+		}
+
+		if (result.data?.error) {
+			return `Error: ${result.data.error}`;
+		}
+
+		let output = `## Log: ${result.data?.file}\n`;
+		output += `Lines: ${result.data?.returnedLines}/${result.data?.totalLines}`;
+		if (result.data?.truncated) {
+			output += ` (truncated, showing last ${result.data.returnedLines} lines)`;
+		}
+		output += `\n\n`;
+		output += result.data?.content || "No content";
+		
+		if (result.data?.availableFiles && result.data.availableFiles.length > 1) {
+			output += `\n\n---\nOther available logs: ${result.data.availableFiles.slice(1, 5).join(", ")}`;
+		}
+
+		return output;
+	},
+});
+
 export const ChiefWiggumPlugin = async () => ({
-	
 	tool: {
 		status,
+		summary,
 		start_loop,
 		complete_iteration,
 		next_task,
