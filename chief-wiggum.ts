@@ -342,6 +342,7 @@ const FLAG_DEFS: Record<string, FlagDef> = {
 	"--interactive": { key: "interactive", hasValue: false },
 	"--no-plugins": { key: "noPlugins", hasValue: false },
 	"--log": { key: "log", hasValue: false },
+	"--no-log": { key: "noLog", hasValue: false },
 	"--clear": { key: "clear", hasValue: false },
 	"--json": { key: "json", hasValue: false },
 	"-p": { key: "port", hasValue: true, default: "3456" },
@@ -454,13 +455,13 @@ Behavior:
   --no-commit             Disable auto-commit after iterations
   -i, --interactive       Require permission prompts (default: auto-approve)
   --no-plugins            Disable non-auth plugins (opencode only)
-  --log                   Log output to .ralph/logs/
+  --no-log                Disable logging to .ralph/logs/ (enabled by default)
 
 Examples:
   chief-wiggum run                                    # Uses defaults
   chief-wiggum run -f prompt.md -t docs/tasks.md -M M2b -n 50
   chief-wiggum run "Fix the auth bug" --timeout 15
-  chief-wiggum run -f prompt.md --force --log
+  chief-wiggum run -f prompt.md --force --no-log
 `;
 
 const HELP_STATUS = `
@@ -2417,7 +2418,7 @@ async function cmdRun(
 		noCommit: !!flags.noCommit,
 		interactive: !!flags.interactive,
 		noPlugins: !!flags.noPlugins,
-		log: !!flags.log,
+		log: !flags.noLog,
 	};
 
 	// Set globals
