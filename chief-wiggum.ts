@@ -1684,8 +1684,8 @@ function analyzeLogContent(content: string): LogAnalysis {
 					: "Unknown";
 				errorCounts.set(error, { count: 1, firstSeen });
 			} else {
-				const existing = errorCounts.get(error)!;
-				existing.count++;
+				const existing = errorCounts.get(error);
+				if (existing) existing.count++;
 			}
 		}
 	}
@@ -2128,12 +2128,12 @@ async function streamProcessOutput(
 
 	const log = (line: string) => {
 		console.log(line);
-		options.logLine?.(line + "\n");
+		options.logLine?.(`${line}\n`);
 	};
 
 	const logErr = (line: string) => {
 		console.error(line);
-		options.logLine?.(line + "\n");
+		options.logLine?.(`${line}\n`);
 	};
 
 	const maybePrintToolSummary = (force = false) => {
@@ -2893,7 +2893,7 @@ function startHttpServer(port: number): ReturnType<typeof Bun.serve> {
 							let combinedContent = "";
 							for (const file of logFiles) {
 								const content = readFileSync(join(logDir, file), "utf-8");
-								combinedContent += content + "\n";
+								combinedContent += `${content}\n`;
 							}
 
 							// Analyze the logs
@@ -3040,7 +3040,7 @@ function startHttpServer(port: number): ReturnType<typeof Bun.serve> {
 									copyFileSync(srcPath, destPath);
 									unlinkSync(srcPath);
 									archived.push(file);
-								} catch (err) {
+								} catch (_err) {
 									skipped.push(file);
 								}
 							}
@@ -3054,6 +3054,132 @@ function startHttpServer(port: number): ReturnType<typeof Bun.serve> {
 							});
 						}
 					}
+				} else if (method === "POST" && path === "/task/mark") {
+					return (async () => {
+						try {
+							const body = await req.json();
+							const taskId = body.taskId as string;
+							const status = body.status as string;
+							const reason = body.reason as string | undefined;
+
+							if (!taskId || !status) {
+								return jsonResponse(
+									{ success: false, error: "Missing 'taskId' or 'status'" },
+									400,
+								);
+							}
+
+							const validStatuses = [
+								"todo",
+								"in-progress",
+								"complete",
+								"failed",
+							];
+							if (!validStatuses.includes(status)) {
+								return jsonResponse(
+									{
+										success: false,
+										error: `Invalid status: ${status}. Valid: ${validStatuses.join(", ")}`,
+									},
+									400,
+								);
+							}
+
+							if (!structuredTasksFile) {
+								return jsonResponse(
+									{
+										success: false,
+										error: "No structured tasks file configured",
+									},
+									400,
+								);
+							}
+
+							const filePath = join(workspaceRoot, structuredTasksFile);
+							if (!existsSync(filePath)) {
+								return jsonResponse(
+									{
+										success: false,
+										error: `Tasks file not found: ${structuredTasksFile}`,
+									},
+									404,
+								);
+							}
+
+							const content = readFileSync(filePath, "utf-8");
+							const lines = content.split("\n");
+							const statusCharMap: Record<string, string> = {
+								todo: " ",
+								"in-progress": "/",
+								complete: "x",
+								failed: "!",
+							};
+							const newChar = statusCharMap[status];
+
+							let found = false;
+							let taskLineIndex = -1;
+							for (let i = 0; i < lines.length; i++) {
+								const match = lines[i].match(
+									/^(-\s+\[)([ x/!])(\]\s+)([a-zA-Z0-9_-]+)(:\s*.+)$/,
+								);
+								if (match && match[4] === taskId) {
+									lines[i] =
+										`${match[1]}${newChar}${match[3]}${match[4]}${match[5]}`;
+									taskLineIndex = i;
+									found = true;
+									break;
+								}
+							}
+
+							if (!found) {
+								return jsonResponse(
+									{ success: false, error: `Task not found: ${taskId}` },
+									404,
+								);
+							}
+
+							const now = new Date().toISOString();
+							let insertIndex = taskLineIndex + 1;
+							while (
+								insertIndex < lines.length &&
+								lines[insertIndex].match(/^\s+-\s+\w+:/)
+							) {
+								insertIndex++;
+							}
+
+							const metaLines: string[] = [];
+							if (status === "in-progress") {
+								metaLines.push(`  - started: ${now}`);
+							} else if (status === "complete") {
+								metaLines.push(`  - completed: ${now}`);
+							} else if (status === "failed") {
+								metaLines.push(`  - failed: ${reason || "Marked as failed"}`);
+							}
+
+							if (metaLines.length > 0) {
+								lines.splice(insertIndex, 0, ...metaLines);
+							}
+
+							writeFileSync(filePath, lines.join("\n"));
+
+							console.log(
+								`📋 Task ${taskId} marked as ${status}${reason ? ` (${reason})` : ""}`,
+							);
+
+							return jsonResponse({
+								success: true,
+								taskId,
+								status,
+								reason: reason || null,
+								updatedAt: now,
+							});
+						} catch {
+							return jsonResponse(
+								{ success: false, error: "Invalid JSON body" },
+								400,
+							);
+						}
+					})();
 				} else if (method === "GET" && path === "/suggested-tasks") {
 					const suggestedPath = getSuggestedTasksPath();
 					try {
@@ -3420,7 +3546,7 @@ async function cmdRun(
 		);
 		const iterHeader = `\n🔄 Iteration ${state.iteration}${iterInfo} (${totalElapsed})`;
 		console.log(iterHeader);
-		appendToLog(iterHeader + "\n");
+		appendToLog(`${iterHeader}\n`);
 
 		if (structuredTasksFile) {
 			const summary = getStructuredTasksSummary(milestoneFilter);
@@ -3431,10 +3557,10 @@ async function cmdRun(
 				summary.blocked > 0 ? ` | Blocked: ${summary.blocked}` : "";
 			const taskLine = `   Tasks: ${summary.completed}/${summary.total}${failedInfo}${blockedInfo} | Next: ${nextTask?.id || "NONE"}`;
 			console.log(taskLine);
-			appendToLog(taskLine + "\n");
+			appendToLog(`${taskLine}\n`);
 		}
 		console.log("─".repeat(68));
-		appendToLog("─".repeat(68) + "\n");
+		appendToLog(`${"─".repeat(68)}\n`);
 
 		const contextAtStart = loadContext();
 		const snapshotBefore = await captureFileSnapshot();
@@ -3495,7 +3621,7 @@ async function cmdRun(
 			if (timedOut) {
 				const timeoutMsg = `\n⚠️  Process killed due to inactivity timeout (${opts.timeout} minutes)`;
 				console.log(timeoutMsg);
-				appendToLog(timeoutMsg + "\n");
+				appendToLog(`${timeoutMsg}\n`);
 			}
 
 			const combinedOutput = `${result}\n${stderr}`;
