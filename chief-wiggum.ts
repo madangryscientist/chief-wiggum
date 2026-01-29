@@ -12,8 +12,8 @@ import {
 	copyFileSync,
 	existsSync,
 	mkdirSync,
-	readFileSync,
 	readdirSync,
+	readFileSync,
 	unlinkSync,
 	writeFileSync,
 } from "node:fs";
@@ -32,11 +32,12 @@ interface StructuredTask {
 	id: string;
 	title: string;
 	milestone: string | null;
-	status: "todo" | "in-progress" | "complete";
+	status: "todo" | "in-progress" | "complete" | "failed";
 	depends: string[];
 	verify: string | null;
 	started: string | null;
 	completed: string | null;
+	failedReason: string | null;
 	originalLines: string[];
 }
 
@@ -82,6 +83,7 @@ interface RalphState {
 	tasksMode: boolean;
 	taskPromise: string;
 	prompt: string;
+	promptFile?: string | null;
 	startedAt: string;
 	model: string;
 	agent: AgentType;
@@ -435,7 +437,7 @@ Defaults:
 Core Options:
   -f, --prompt <file>     Prompt file path (default: docs/prompt.md)
   -n, --iterations <n>    Max iterations (0=unlimited, default: 0)
-  -m, --model <name>      Model to use (default: anthropic/claude-sonnet-4-5)
+  -m, --model <name>      Model to use (default: anthropic/claude-opus-4-5)
   -a, --agent <type>      Agent: opencode (default), claude-code, codex
 
 Tasks:
@@ -759,7 +761,7 @@ function parseStructuredTasks(content: string): ParsedTasksFile {
 		}
 
 		const taskMatch = line.match(
-			/^-\s+\[([ x/])\]\s+([a-zA-Z0-9_-]+):\s*(.+)$/,
+			/^-\s+\[([ x/!])\]\s+([a-zA-Z0-9_-]+):\s*(.+)$/,
 		);
 		if (taskMatch) {
 			saveCurrentTask();
@@ -767,6 +769,7 @@ function parseStructuredTasks(content: string): ParsedTasksFile {
 			let status: StructuredTask["status"] = "todo";
 			if (statusChar === "x") status = "complete";
 			else if (statusChar === "/") status = "in-progress";
+			else if (statusChar === "!") status = "failed";
 
 			currentTask = {
 				id,
@@ -777,6 +780,7 @@ function parseStructuredTasks(content: string): ParsedTasksFile {
 				verify: null,
 				started: null,
 				completed: null,
+				failedReason: null,
 				originalLines: [],
 			};
 			taskLines = [line];
@@ -807,6 +811,12 @@ function parseStructuredTasks(content: string): ParsedTasksFile {
 			const completedMatch = line.match(/^\s+-\s+completed:\s*(.+)$/);
 			if (completedMatch) {
 				currentTask.completed = completedMatch[1].trim();
+				continue;
+			}
+
+			const failedMatch = line.match(/^\s+-\s+failed:\s*(.+)$/);
+			if (failedMatch) {
+				currentTask.failedReason = failedMatch[1].trim();
 			}
 		}
 	}
@@ -839,13 +849,54 @@ function getNextStructuredTask(
 		tasks = Array.from(data.allTasks.values());
 	}
 
+	function hasFailedDependency(taskId: string, visited: Set<string>): boolean {
+		if (visited.has(taskId)) return false;
+		visited.add(taskId);
+
+		const task = data.allTasks.get(taskId);
+		if (!task) return false;
+		if (task.status === "failed") return true;
+
+		for (const depId of task.depends) {
+			if (hasFailedDependency(depId, visited)) return true;
+		}
+		return false;
+	}
+
+	function findIncompleteDepRecursive(
+		taskId: string,
+		visited: Set<string>,
+	): StructuredTask | null {
+		if (visited.has(taskId)) return null;
+		visited.add(taskId);
+
+		const task = data.allTasks.get(taskId);
+		if (!task || task.status === "complete") return null;
+
+		for (const depId of task.depends) {
+			const dep = data.allTasks.get(depId);
+			if (dep && dep.status !== "complete") {
+				const deeperDep = findIncompleteDepRecursive(depId, visited);
+				if (deeperDep) return deeperDep;
+				return dep;
+			}
+		}
+
+		return null;
+	}
+
 	for (const task of tasks) {
 		if (task.status !== "todo" && task.status !== "in-progress") continue;
-		const allDepsComplete = task.depends.every((depId) => {
-			const dep = data.allTasks.get(depId);
-			return dep?.status === "complete";
-		});
-		if (allDepsComplete) return task;
+
+		if (hasFailedDependency(task.id, new Set())) continue;
+
+		const incompleteDep = findIncompleteDepRecursive(task.id, new Set());
+		if (incompleteDep) {
+			if (incompleteDep.status === "failed") continue;
+			return incompleteDep;
+		}
+
+		return task;
 	}
 	return null;
 }
@@ -864,14 +915,13 @@ function allStructuredTasksComplete(milestone: string | null): boolean {
 	return tasks.length > 0 && tasks.every((t) => t.status === "complete");
 }
 
-function getStructuredTasksSummary(milestone: string | null): {
-	pending: number;
-	inProgress: number;
-	completed: number;
-	total: number;
+function isMilestoneFailed(milestone: string | null): {
+	failed: boolean;
+	failedTasks: StructuredTask[];
+	blockedTasks: StructuredTask[];
 } {
 	const data = loadStructuredTasks();
-	if (!data) return { pending: 0, inProgress: 0, completed: 0, total: 0 };
+	if (!data) return { failed: false, failedTasks: [], blockedTasks: [] };
 
 	let tasks: StructuredTask[];
 	if (milestone) {
@@ -880,10 +930,98 @@ function getStructuredTasksSummary(milestone: string | null): {
 		tasks = Array.from(data.allTasks.values());
 	}
 
-	const pending = tasks.filter((t) => t.status === "todo").length;
+	const failedTasks = tasks.filter((t) => t.status === "failed");
+	if (failedTasks.length === 0)
+		return { failed: false, failedTasks: [], blockedTasks: [] };
+
+	function hasFailedDep(taskId: string, visited: Set<string>): boolean {
+		if (visited.has(taskId)) return false;
+		visited.add(taskId);
+		const task = data.allTasks.get(taskId);
+		if (!task) return false;
+		if (task.status === "failed") return true;
+		for (const depId of task.depends) {
+			if (hasFailedDep(depId, visited)) return true;
+		}
+		return false;
+	}
+
+	const blockedTasks = tasks.filter(
+		(t) =>
+			t.status !== "complete" &&
+			t.status !== "failed" &&
+			hasFailedDep(t.id, new Set()),
+	);
+
+	const workable = tasks.filter(
+		(t) =>
+			(t.status === "todo" || t.status === "in-progress") &&
+			!hasFailedDep(t.id, new Set()),
+	);
+
+	return {
+		failed: workable.length === 0,
+		failedTasks,
+		blockedTasks,
+	};
+}
+
+function getStructuredTasksSummary(milestone: string | null): {
+	pending: number;
+	inProgress: number;
+	completed: number;
+	failed: number;
+	blocked: number;
+	total: number;
+} {
+	const data = loadStructuredTasks();
+	if (!data)
+		return {
+			pending: 0,
+			inProgress: 0,
+			completed: 0,
+			failed: 0,
+			blocked: 0,
+			total: 0,
+		};
+
+	let tasks: StructuredTask[];
+	if (milestone) {
+		tasks = data.milestones.get(milestone) || [];
+	} else {
+		tasks = Array.from(data.allTasks.values());
+	}
+
+	function hasFailedDep(taskId: string, visited: Set<string>): boolean {
+		if (visited.has(taskId)) return false;
+		visited.add(taskId);
+		const task = data.allTasks.get(taskId);
+		if (!task) return false;
+		if (task.status === "failed") return true;
+		for (const depId of task.depends) {
+			if (hasFailedDep(depId, visited)) return true;
+		}
+		return false;
+	}
+
+	const failed = tasks.filter((t) => t.status === "failed").length;
+	const blocked = tasks.filter(
+		(t) =>
+			t.status !== "complete" &&
+			t.status !== "failed" &&
+			hasFailedDep(t.id, new Set()),
+	).length;
+	const pending = tasks.filter((t) => t.status === "todo").length - blocked;
 	const inProgress = tasks.filter((t) => t.status === "in-progress").length;
 	const completed = tasks.filter((t) => t.status === "complete").length;
-	return { pending, inProgress, completed, total: tasks.length };
+	return {
+		pending: Math.max(0, pending),
+		inProgress,
+		completed,
+		failed,
+		blocked,
+		total: tasks.length,
+	};
 }
 
 function _findCurrentTask(tasks: Task[]): Task | null {
@@ -1401,7 +1539,11 @@ interface LogAnalysis {
 	toolUsage: Record<string, number>;
 	totalToolCalls: number;
 	errors: Array<{ error: string; count: number; firstSeen: string }>;
-	repeatedPatterns: Array<{ pattern: string; count: number; suggestion: string }>;
+	repeatedPatterns: Array<{
+		pattern: string;
+		count: number;
+		suggestion: string;
+	}>;
 	suggestions: string[];
 	iterationDetails: IterationSummary[];
 	filesModified: string[];
@@ -1413,20 +1555,22 @@ function analyzeLogContent(content: string): LogAnalysis {
 	// Parse individual iterations
 	const iterationDetails: IterationSummary[] = [];
 	const iterationRegex = /🔄 Iteration (\d+)[\s\S]*?(?=🔄 Iteration \d+|$)/g;
-	
+
 	for (const iterMatch of content.matchAll(iterationRegex)) {
 		const iterContent = iterMatch[0];
 		const iterNum = parseInt(iterMatch[1], 10);
-		
+
 		// Extract duration
 		const durationMatch = iterContent.match(/Elapsed:\s+(\d+):(\d+)/);
-		const duration = durationMatch ? `${durationMatch[1]}:${durationMatch[2]}` : "0:00";
-		
+		const duration = durationMatch
+			? `${durationMatch[1]}:${durationMatch[2]}`
+			: "0:00";
+
 		// Extract tools from summary line like "Tools:     Read 10 • Bash 8 • Edit 1"
 		const tools: Record<string, number> = {};
 		const toolsMatch = iterContent.match(/Tools:\s+([^\n]+)/);
 		if (toolsMatch && toolsMatch[1] !== "none") {
-			const toolParts = toolsMatch[1].split("•").map(s => s.trim());
+			const toolParts = toolsMatch[1].split("•").map((s) => s.trim());
 			for (const part of toolParts) {
 				const [name, countStr] = part.split(/\s+/);
 				if (name && countStr) {
@@ -1434,21 +1578,30 @@ function analyzeLogContent(content: string): LogAnalysis {
 				}
 			}
 		}
-		
+
 		// Extract exit code
 		const exitMatch = iterContent.match(/Exit code:\s+(\d+)/);
 		const exitCode = exitMatch ? parseInt(exitMatch[1], 10) : null;
-		
+
 		// Check if completion detected
 		const completed = /Completion:\s+detected/i.test(iterContent);
-		
+
 		// Extract task ID if mentioned
-		const taskMatch = iterContent.match(/Next:\s+(m\d+-\d+)/i) || iterContent.match(/task\s+(m\d+-\d+)/i);
+		const taskMatch =
+			iterContent.match(/Next:\s+(m\d+-\d+)/i) ||
+			iterContent.match(/task\s+(m\d+-\d+)/i);
 		const taskId = taskMatch ? taskMatch[1] : null;
-		
-		iterationDetails.push({ number: iterNum, duration, tools, exitCode, completed, taskId });
+
+		iterationDetails.push({
+			number: iterNum,
+			duration,
+			tools,
+			exitCode,
+			completed,
+			taskId,
+		});
 	}
-	
+
 	const iterations = iterationDetails.length;
 
 	// Calculate total duration
@@ -1460,7 +1613,8 @@ function analyzeLogContent(content: string): LogAnalysis {
 	const totalMins = Math.floor(totalSeconds / 60);
 	const totalSecs = totalSeconds % 60;
 	const totalDuration = `${totalMins}:${String(totalSecs).padStart(2, "0")}`;
-	const avgIterationSeconds = iterations > 0 ? Math.round(totalSeconds / iterations) : 0;
+	const avgIterationSeconds =
+		iterations > 0 ? Math.round(totalSeconds / iterations) : 0;
 
 	// Aggregate tool usage
 	const toolUsage: Record<string, number> = {};
@@ -1470,11 +1624,13 @@ function analyzeLogContent(content: string): LogAnalysis {
 		}
 	}
 	const totalToolCalls = Object.values(toolUsage).reduce((a, b) => a + b, 0);
-	const avgToolsPerIteration = iterations > 0 ? Math.round(totalToolCalls / iterations) : 0;
+	const avgToolsPerIteration =
+		iterations > 0 ? Math.round(totalToolCalls / iterations) : 0;
 
 	// Extract completed tasks
 	const tasksCompleted: string[] = [];
-	const taskCompleteRegex = /(?:completed?|done|finished|mark.*complete|✅).*?(m\d+-\d+)/gi;
+	const taskCompleteRegex =
+		/(?:completed?|done|finished|mark.*complete|✅).*?(m\d+-\d+)/gi;
 	for (const taskMatch of content.matchAll(taskCompleteRegex)) {
 		const taskId = taskMatch[1].toLowerCase();
 		if (!tasksCompleted.includes(taskId)) {
@@ -1494,7 +1650,8 @@ function analyzeLogContent(content: string): LogAnalysis {
 
 	// Extract modified files
 	const filesModified: string[] = [];
-	const fileModRegex = /(?:Edit|Write|modified|created|updated)\s+(?:\d+\s+)?([\/\w.-]+\.\w+)/gi;
+	const fileModRegex =
+		/(?:Edit|Write|modified|created|updated)\s+(?:\d+\s+)?([/\w.-]+\.\w+)/gi;
 	for (const fileMatch of content.matchAll(fileModRegex)) {
 		const file = fileMatch[1];
 		if (!filesModified.includes(file) && !file.includes("ralph")) {
@@ -1522,7 +1679,9 @@ function analyzeLogContent(content: string): LogAnalysis {
 				const pos = match.index || 0;
 				const before = content.substring(Math.max(0, pos - 500), pos);
 				const iterMatch = before.match(/🔄 Iteration (\d+)/g);
-				const firstSeen = iterMatch ? `Iteration ${iterMatch[iterMatch.length - 1]?.match(/\d+/)?.[0]}` : "Unknown";
+				const firstSeen = iterMatch
+					? `Iteration ${iterMatch[iterMatch.length - 1]?.match(/\d+/)?.[0]}`
+					: "Unknown";
 				errorCounts.set(error, { count: 1, firstSeen });
 			} else {
 				const existing = errorCounts.get(error)!;
@@ -1531,32 +1690,48 @@ function analyzeLogContent(content: string): LogAnalysis {
 		}
 	}
 	const errors = Array.from(errorCounts.entries())
-		.map(([error, data]) => ({ error, count: data.count, firstSeen: data.firstSeen }))
+		.map(([error, data]) => ({
+			error,
+			count: data.count,
+			firstSeen: data.firstSeen,
+		}))
 		.sort((a, b) => b.count - a.count)
 		.slice(0, 15);
 
 	// Calculate completion rate
-	const completedIterations = iterationDetails.filter(i => i.completed).length;
-	const completionRate = iterations > 0 ? Math.round((completedIterations / iterations) * 100) : 0;
+	const completedIterations = iterationDetails.filter(
+		(i) => i.completed,
+	).length;
+	const completionRate =
+		iterations > 0 ? Math.round((completedIterations / iterations) * 100) : 0;
 
 	// Detect repeated patterns that suggest prompt improvements
-	const repeatedPatterns: Array<{ pattern: string; count: number; suggestion: string }> = [];
+	const repeatedPatterns: Array<{
+		pattern: string;
+		count: number;
+		suggestion: string;
+	}> = [];
 	const suggestions: string[] = [];
 
 	// Pattern: Checking test files multiple times
-	const testCheckMatches = content.match(/(?:run.*test|bun test|npm test|nx.*test|checking.*test|test.*pass|test.*fail)/gi) || [];
+	const testCheckMatches =
+		content.match(
+			/(?:run.*test|bun test|npm test|nx.*test|checking.*test|test.*pass|test.*fail)/gi,
+		) || [];
 	if (testCheckMatches.length > 3) {
 		repeatedPatterns.push({
 			pattern: "Test execution",
 			count: testCheckMatches.length,
 			suggestion: "Add test commands and expected patterns to prompt file",
 		});
-		suggestions.push(`Tests were run/checked ${testCheckMatches.length} times. Add 'nx test <project>' commands to the prompt file so the agent knows exactly how to run tests.`);
+		suggestions.push(
+			`Tests were run/checked ${testCheckMatches.length} times. Add 'nx test <project>' commands to the prompt file so the agent knows exactly how to run tests.`,
+		);
 	}
 
 	// Pattern: Reading same file multiple times
 	const fileReadCounts = new Map<string, number>();
-	const fileReadRegex = /(?:Read|Reading).*?([\/\w.-]+\.\w+)/gi;
+	const fileReadRegex = /(?:Read|Reading).*?([/\w.-]+\.\w+)/gi;
 	for (const fileMatch of content.matchAll(fileReadRegex)) {
 		const file = fileMatch[1];
 		fileReadCounts.set(file, (fileReadCounts.get(file) || 0) + 1);
@@ -1572,12 +1747,18 @@ function analyzeLogContent(content: string): LogAnalysis {
 		});
 	}
 	if (frequentReads.length > 0) {
-		suggestions.push(`Files read repeatedly: ${frequentReads.slice(0, 3).map(([f, c]) => `${f} (${c}x)`).join(", ")}. Consider adding their key content to the prompt.`);
+		suggestions.push(
+			`Files read repeatedly: ${frequentReads
+				.slice(0, 3)
+				.map(([f, c]) => `${f} (${c}x)`)
+				.join(", ")}. Consider adding their key content to the prompt.`,
+		);
 	}
 
 	// Pattern: Searching for same thing multiple times
 	const searchCounts = new Map<string, number>();
-	const searchRegex = /(?:grep|Grep|search|find|looking for|searching).*?["']([^"']{3,50})["']/gi;
+	const searchRegex =
+		/(?:grep|Grep|search|find|looking for|searching).*?["']([^"']{3,50})["']/gi;
 	for (const searchMatch of content.matchAll(searchRegex)) {
 		const term = searchMatch[1].substring(0, 50);
 		searchCounts.set(term, (searchCounts.get(term) || 0) + 1);
@@ -1596,12 +1777,15 @@ function analyzeLogContent(content: string): LogAnalysis {
 	// Pattern: Same error occurring multiple times
 	for (const { error, count } of errors) {
 		if (count > 2) {
-			suggestions.push(`Error "${error.substring(0, 50)}..." occurred ${count} times. Add specific fix instructions to prompt.`);
+			suggestions.push(
+				`Error "${error.substring(0, 50)}..." occurred ${count} times. Add specific fix instructions to prompt.`,
+			);
 		}
 	}
 
 	// Pattern: Git operations repeated
-	const gitMatches = content.match(/git (?:add|commit|push|status|diff)/gi) || [];
+	const gitMatches =
+		content.match(/git (?:add|commit|push|status|diff)/gi) || [];
 	if (gitMatches.length > 15) {
 		repeatedPatterns.push({
 			pattern: "Git operations",
@@ -1611,17 +1795,23 @@ function analyzeLogContent(content: string): LogAnalysis {
 	}
 
 	// Pattern: Server start/restart
-	const serverMatches = content.match(/(?:nx serve|npm start|starting server|server.*running|listening on port)/gi) || [];
+	const serverMatches =
+		content.match(
+			/(?:nx serve|npm start|starting server|server.*running|listening on port)/gi,
+		) || [];
 	if (serverMatches.length > 5) {
 		repeatedPatterns.push({
 			pattern: "Server start/restart",
 			count: serverMatches.length,
-			suggestion: "Server started many times. Add instructions to check if already running.",
+			suggestion:
+				"Server started many times. Add instructions to check if already running.",
 		});
 	}
 
 	// Pattern: Build commands
-	const buildMatches = content.match(/(?:nx build|npm run build|bun build|building|compiled)/gi) || [];
+	const buildMatches =
+		content.match(/(?:nx build|npm run build|bun build|building|compiled)/gi) ||
+		[];
 	if (buildMatches.length > 10) {
 		repeatedPatterns.push({
 			pattern: "Build commands",
@@ -1632,12 +1822,16 @@ function analyzeLogContent(content: string): LogAnalysis {
 
 	// Low completion rate warning
 	if (iterations > 5 && completionRate < 20) {
-		suggestions.push(`Low task completion rate (${completionRate}%). Tasks may be too large or unclear. Consider breaking into smaller tasks.`);
+		suggestions.push(
+			`Low task completion rate (${completionRate}%). Tasks may be too large or unclear. Consider breaking into smaller tasks.`,
+		);
 	}
 
 	// Long average iteration time
 	if (avgIterationSeconds > 180) {
-		suggestions.push(`Average iteration takes ${Math.round(avgIterationSeconds / 60)} minutes. Consider adding more specific instructions to speed up.`);
+		suggestions.push(
+			`Average iteration takes ${Math.round(avgIterationSeconds / 60)} minutes. Consider adding more specific instructions to speed up.`,
+		);
 	}
 
 	return {
@@ -1731,6 +1925,7 @@ ${context}
 		const summary = getStructuredTasksSummary(state.milestoneFilter);
 		const nextTask = getNextStructuredTask(state.milestoneFilter);
 		const allComplete = allStructuredTasksComplete(state.milestoneFilter);
+		const milestoneFailure = isMilestoneFailed(state.milestoneFilter);
 
 		const data = loadStructuredTasks();
 		let tasks: StructuredTask[] = [];
@@ -1742,23 +1937,43 @@ ${context}
 			}
 		}
 
+		const blockedIds = new Set(milestoneFailure.blockedTasks.map((t) => t.id));
+
+		const statusIcons: Record<string, string> = {
+			complete: "✅",
+			failed: "❌",
+			"in-progress": "🔄",
+			todo: "⏸️",
+		};
+
 		const taskList = tasks
 			.map((t) => {
-				const statusIcon =
-					t.status === "complete"
-						? "✅"
-						: t.status === "in-progress"
-							? "🔄"
-							: "⏸️";
+				const icon = blockedIds.has(t.id) ? "🚫" : statusIcons[t.status] || "⏸️";
 				const deps = t.depends.length
 					? ` (depends: ${t.depends.join(", ")})`
 					: "";
-				return `${statusIcon} ${t.id}: ${t.title}${deps}`;
+				const reason =
+					t.status === "failed" && t.failedReason ? ` — ${t.failedReason}` : "";
+				return `${icon} ${t.id}: ${t.title}${deps}${reason}`;
 			})
 			.join("\n");
 
+		const summaryLine = `${summary.completed}/${summary.total} complete, ${summary.inProgress} in progress, ${summary.pending} pending${summary.failed > 0 ? `, ${summary.failed} failed` : ""}${summary.blocked > 0 ? `, ${summary.blocked} blocked` : ""}`;
+
 		let taskInstructions = "";
-		if (allComplete) {
+		if (milestoneFailure.failed && !allComplete) {
+			const failedNames = milestoneFailure.failedTasks
+				.map((t) => t.id)
+				.join(", ");
+			const blockedNames = milestoneFailure.blockedTasks
+				.map((t) => t.id)
+				.join(", ");
+			taskInstructions = `
+❌ MILESTONE FAILED
+   Failed tasks: ${failedNames}
+   ${blockedNames ? `Blocked tasks: ${blockedNames}` : ""}
+   No remaining workable tasks. Output <promise>MILESTONE_FAILED</promise> to signal failure.`;
+		} else if (allComplete) {
 			taskInstructions = `\n✅ ALL TASKS COMPLETE!\n   Output <promise>${state.completionPromise}</promise> to finish.`;
 		} else if (nextTask) {
 			taskInstructions = `
@@ -1785,7 +2000,7 @@ You are in an iterative development loop working through a structured task list.
 ${contextSection}
 ## STRUCTURED TASKS MODE: ${state.milestoneFilter ? `Milestone ${state.milestoneFilter}` : "All Tasks"}
 
-**Summary:** ${summary.completed}/${summary.total} complete, ${summary.inProgress} in progress, ${summary.pending} pending
+**Summary:** ${summaryLine}
 
 **Tasks:**
 ${taskList}
@@ -1806,6 +2021,14 @@ ${state.prompt}
 - ONLY output <promise>${state.completionPromise}</promise> when ALL tasks for milestone ${state.milestoneFilter || "ALL"} are complete
 - Do NOT lie or output false promises to exit the loop
 - If stuck, try a different approach
+
+## Failing a Task
+
+If a task requires going against your given instructions or is truly impossible:
+1. Change the task status from [ ] or [/] to [!] in ${state.structuredTasksFile}
+2. Add "- failed: <reason>" under the task explaining why
+3. Output <promise>${state.taskPromise}</promise> to move on
+4. Tasks that depend on a failed task will be automatically skipped
 
 ## Performance Tips
 
@@ -2566,11 +2789,15 @@ function startHttpServer(port: number): ReturnType<typeof Bun.serve> {
 								(t) => t.status === "in-progress",
 							).length;
 							const todo = allTasks.filter((t) => t.status === "todo").length;
+							const failed = allTasks.filter(
+								(t) => t.status === "failed",
+							).length;
 							response = jsonResponse({
 								total: allTasks.length,
 								complete,
 								inProgress,
 								todo,
+								failed,
 								tasks: allTasks,
 							});
 						} else {
@@ -2579,6 +2806,7 @@ function startHttpServer(port: number): ReturnType<typeof Bun.serve> {
 								complete: 0,
 								inProgress: 0,
 								todo: 0,
+								failed: 0,
 								tasks: [],
 							});
 						}
@@ -2588,6 +2816,7 @@ function startHttpServer(port: number): ReturnType<typeof Bun.serve> {
 							complete: 0,
 							inProgress: 0,
 							todo: 0,
+							failed: 0,
 							tasks: [],
 						});
 					}
@@ -2641,7 +2870,7 @@ function startHttpServer(port: number): ReturnType<typeof Bun.serve> {
 					// Returns analyzed summary of ALL log files in logs/ (not archived)
 					const logDir = getLogDir();
 					const includeRaw = url.searchParams.get("raw") === "true";
-					
+
 					if (!existsSync(logDir)) {
 						response = jsonResponse({
 							error: "No log directory found",
@@ -2678,18 +2907,64 @@ function startHttpServer(port: number): ReturnType<typeof Bun.serve> {
 							});
 						}
 					}
+				} else if (method === "GET" && path === "/logs/raw") {
+					// Returns raw concatenated content of ALL current log files (for LLM analysis)
+					const logDir = getLogDir();
+
+					if (!existsSync(logDir)) {
+						response = jsonResponse({
+							error: "No log directory found",
+							files: [],
+							fileCount: 0,
+							content: "",
+							totalBytes: 0,
+						});
+					} else {
+						const logFiles = readdirSync(logDir)
+							.filter((f) => f.endsWith(".log"))
+							.sort();
+
+						if (logFiles.length === 0) {
+							response = jsonResponse({
+								files: [],
+								fileCount: 0,
+								content: "",
+								totalBytes: 0,
+							});
+						} else {
+							let combinedContent = "";
+							for (const file of logFiles) {
+								const content = readFileSync(join(logDir, file), "utf-8");
+								combinedContent += `\n=== ${file} ===\n${content}`;
+							}
+
+							// Include config file paths from state
+							const state = loadState();
+							response = jsonResponse({
+								files: logFiles,
+								fileCount: logFiles.length,
+								content: combinedContent,
+								totalBytes: combinedContent.length,
+								configFiles: {
+									promptFile: state?.promptFile || null,
+									tasksFile: state?.structuredTasksFile || null,
+								},
+							});
+						}
+					}
 				} else if (method === "GET" && path === "/logs") {
 					// Returns archived log files from logs/archive/
 					const logDir = getLogDir();
 					const archiveDir = join(logDir, "archive");
 					const requestedFile = url.searchParams.get("file");
-					
+
 					if (!existsSync(archiveDir)) {
 						response = jsonResponse({
 							archiveDir,
 							archivedFiles: [],
 							count: 0,
-							message: "No archived logs. Use POST /logs/archive to archive current logs.",
+							message:
+								"No archived logs. Use POST /logs/archive to archive current logs.",
 						});
 					} else {
 						const archivedFiles = readdirSync(archiveDir)
@@ -2707,9 +2982,12 @@ function startHttpServer(port: number): ReturnType<typeof Bun.serve> {
 						} else {
 							// Read specific archived log file
 							const logPath = join(archiveDir, requestedFile);
-							
+
 							if (!existsSync(logPath)) {
-								response = jsonResponse({ error: `Archived log not found: ${requestedFile}` }, 404);
+								response = jsonResponse(
+									{ error: `Archived log not found: ${requestedFile}` },
+									404,
+								);
 							} else {
 								const content = readFileSync(logPath, "utf-8");
 
@@ -2725,12 +3003,13 @@ function startHttpServer(port: number): ReturnType<typeof Bun.serve> {
 					// Move all current logs to archive folder
 					const logDir = getLogDir();
 					const archiveDir = join(logDir, "archive");
-					
+
 					if (!existsSync(logDir)) {
 						response = jsonResponse({ error: "No log directory found" }, 404);
 					} else {
-						const logFiles = readdirSync(logDir)
-							.filter((f) => f.endsWith(".log"));
+						const logFiles = readdirSync(logDir).filter((f) =>
+							f.endsWith(".log"),
+						);
 
 						if (logFiles.length === 0) {
 							response = jsonResponse({
@@ -2750,7 +3029,7 @@ function startHttpServer(port: number): ReturnType<typeof Bun.serve> {
 							for (const file of logFiles) {
 								const srcPath = join(logDir, file);
 								const destPath = join(archiveDir, file);
-								
+
 								// Skip the currently active log file
 								if (srcPath === logFilePath) {
 									skipped.push(file);
@@ -2774,6 +3053,19 @@ function startHttpServer(port: number): ReturnType<typeof Bun.serve> {
 								archiveDir,
 							});
 						}
+					}
+				} else if (method === "GET" && path === "/suggested-tasks") {
+					const suggestedPath = getSuggestedTasksPath();
+					try {
+						const content = readFileSync(suggestedPath, "utf-8");
+						response = jsonResponse({ path: suggestedPath, content });
+					} catch {
+						response = jsonResponse({
+							path: suggestedPath,
+							content: null,
+							message:
+								"No suggested tasks file found. Tasks are suggested via <suggest-task> tags during iterations.",
+						});
 					}
 				} else if (method === "POST" && path === "/stop") {
 					const state = loadState();
@@ -2838,7 +3130,7 @@ async function cmdRun(
 	const opts: RunOptions = {
 		prompt: "",
 		promptFile: (flags.prompt as string) || "",
-		model: (flags.model as string) || "anthropic/claude-sonnet-4-5",
+		model: (flags.model as string) || "anthropic/claude-opus-4-5",
 		agent: ((flags.agent as string) || "opencode") as AgentType,
 		iterations: parseInt((flags.iterations as string) || "0", 10) || 0,
 		tasksFile: (flags.tasksFile as string) || null,
@@ -2998,6 +3290,22 @@ async function cmdRun(
 
 	// Start HTTP server for external access
 	const port = parseInt((flags.port as string) || "3456", 10);
+	if (opts.force) {
+		try {
+			const result = Bun.spawnSync(["lsof", "-ti", `:${port}`]);
+			const pids = new TextDecoder()
+				.decode(result.stdout)
+				.trim()
+				.split("\n")
+				.filter(Boolean);
+			for (const pid of pids) {
+				process.kill(parseInt(pid, 10), "SIGKILL");
+			}
+			if (pids.length > 0) {
+				console.log(`⚠️  Killed ${pids.length} process(es) on port ${port}`);
+			}
+		} catch {}
+	}
 	startHttpServer(port);
 	console.log(`🌐 HTTP server running on http://localhost:${port}`);
 	console.log("   POST /context - inject context");
@@ -3016,6 +3324,7 @@ async function cmdRun(
 		tasksMode: !!opts.tasksFile,
 		taskPromise: opts.next,
 		prompt: opts.prompt,
+		promptFile: opts.promptFile || null,
 		startedAt: new Date().toISOString(),
 		model: opts.model,
 		agent: opts.agent,
@@ -3106,7 +3415,9 @@ async function cmdRun(
 		}
 
 		const iterInfo = opts.iterations > 0 ? ` / ${opts.iterations}` : "";
-		const totalElapsed = formatDuration(Date.now() - new Date(state.startedAt).getTime());
+		const totalElapsed = formatDuration(
+			Date.now() - new Date(state.startedAt).getTime(),
+		);
 		const iterHeader = `\n🔄 Iteration ${state.iteration}${iterInfo} (${totalElapsed})`;
 		console.log(iterHeader);
 		appendToLog(iterHeader + "\n");
@@ -3114,7 +3425,11 @@ async function cmdRun(
 		if (structuredTasksFile) {
 			const summary = getStructuredTasksSummary(milestoneFilter);
 			const nextTask = getNextStructuredTask(milestoneFilter);
-			const taskLine = `   Tasks: ${summary.completed}/${summary.total} | Next: ${nextTask?.id || "NONE"}`;
+			const failedInfo =
+				summary.failed > 0 ? ` | Failed: ${summary.failed}` : "";
+			const blockedInfo =
+				summary.blocked > 0 ? ` | Blocked: ${summary.blocked}` : "";
+			const taskLine = `   Tasks: ${summary.completed}/${summary.total}${failedInfo}${blockedInfo} | Next: ${nextTask?.id || "NONE"}`;
 			console.log(taskLine);
 			appendToLog(taskLine + "\n");
 		}
@@ -3192,6 +3507,8 @@ async function cmdRun(
 				`<promise>\\s*${escapeRegex(opts.next)}\\s*</promise>`,
 				"i",
 			).test(combinedOutput);
+			const milestoneFailedDetected =
+				/<promise>\s*MILESTONE_FAILED\s*<\/promise>/i.test(combinedOutput);
 
 			// Parse suggested tasks
 			const suggestedTasks = parseSuggestedTasks(combinedOutput);
@@ -3283,6 +3600,54 @@ Completion: ${completionDetected ? "detected" : "not detected"}
 				clearHistory();
 				clearContext();
 				break;
+			}
+
+			if (milestoneFailedDetected) {
+				const failure = isMilestoneFailed(state.milestoneFilter);
+				const failedNames = failure.failedTasks.map(
+					(t) => `${t.id}${t.failedReason ? ` (${t.failedReason})` : ""}`,
+				);
+				const blockedNames = failure.blockedTasks.map((t) => t.id);
+
+				console.log(
+					`\n╔══════════════════════════════════════════════════════════════════╗`,
+				);
+				console.log(`║  ❌ Milestone ${state.milestoneFilter || "ALL"} FAILED`);
+				console.log(`║  After ${state.iteration} iteration(s)`);
+				console.log(
+					`║  Total time: ${formatDurationLong(history.totalDurationMs)}`,
+				);
+				console.log(`║`);
+				console.log(`║  Failed tasks:`);
+				for (const name of failedNames) {
+					console.log(`║    - ${name}`);
+				}
+				if (blockedNames.length > 0) {
+					console.log(`║  Blocked tasks:`);
+					for (const name of blockedNames) {
+						console.log(`║    - ${name}`);
+					}
+				}
+				console.log(`║`);
+				console.log(`║  Server still running on http://localhost:${port}`);
+				console.log(`║  Use MCP tools to review, then Ctrl+C to exit.`);
+				console.log(
+					`╚══════════════════════════════════════════════════════════════════╝`,
+				);
+
+				if (milestoneFilter) {
+					try {
+						const tagName = `${milestoneFilter.toLowerCase()}-failed`;
+						await $`git tag -a ${tagName} -m "Milestone ${milestoneFilter} failed"`.quiet();
+						console.log(`🏷️  Tagged: ${tagName}`);
+					} catch {}
+				}
+
+				stopCaffeinate();
+				state.active = false;
+				saveState(state);
+
+				await new Promise(() => {});
 			}
 
 			if (contextAtStart) {

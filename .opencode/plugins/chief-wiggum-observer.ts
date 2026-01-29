@@ -191,12 +191,14 @@ const list_tasks = tool({
 			complete: number;
 			inProgress: number;
 			todo: number;
+			failed: number;
 			tasks: Array<{
 				id: string;
 				title: string;
 				milestone: string | null;
-				status: "todo" | "in-progress" | "complete";
+				status: "todo" | "in-progress" | "complete" | "failed";
 				depends: string[];
+				failedReason: string | null;
 			}>;
 		}>("/tasks");
 
@@ -210,17 +212,22 @@ const list_tasks = tool({
 		let output = `TASKS: ${data.complete}/${data.total} complete`;
 		if (data.inProgress > 0) output += `, ${data.inProgress} in progress`;
 		if (data.todo > 0) output += `, ${data.todo} pending`;
+		if (data.failed > 0) output += `, ${data.failed} failed`;
 		output += "\n\n";
 
+		const statusIcons: Record<string, string> = {
+			complete: "[x]",
+			failed: "[!]",
+			"in-progress": "[/]",
+			todo: "[ ]",
+		};
+
 		for (const task of data.tasks) {
-			const icon =
-				task.status === "complete"
-					? "[x]"
-					: task.status === "in-progress"
-						? "[/]"
-						: "[ ]";
+			const icon = statusIcons[task.status] || "[ ]";
 			output += `${icon} ${task.id}: ${task.title}`;
 			if (task.milestone) output += ` (${task.milestone})`;
+			if (task.status === "failed" && task.failedReason)
+				output += ` — ${task.failedReason}`;
 			output += "\n";
 		}
 
@@ -369,7 +376,6 @@ const health_check = tool({
 });
 
 export const ChiefWiggumObserverPlugin = async () => ({
-	
 	tool: {
 		loop_status,
 		inject_context,

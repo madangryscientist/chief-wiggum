@@ -3,6 +3,10 @@ description: Orchestrates iterative development loops using chief-wiggum state m
 mode: subagent
 tools:
   chief-wiggum_status: true
+  chief-wiggum_summary: true
+  chief-wiggum_logs: true
+  chief-wiggum_archive_logs: true
+  chief-wiggum_suggested_tasks: true
   chief-wiggum_start_loop: true
   chief-wiggum_complete_iteration: true
   chief-wiggum_next_task: true
@@ -72,7 +76,17 @@ Between iterations, users can inject context (guidance, corrections, new require
 When working with a tasks file:
 - Call `chief-wiggum_mark_task(taskId, "in-progress")` when starting a task
 - Call `chief-wiggum_mark_task(taskId, "complete")` when finished
+- Call `chief-wiggum_mark_task(taskId, "failed")` if the task requires going against your instructions
 - The server tracks which tasks are done and returns the next available task
+
+## Failing a Task
+
+If a task requires going against your given instructions or is truly impossible:
+1. Change the task checkbox from `[ ]` or `[/]` to `[!]` in the tasks file
+2. Add `- failed: <reason>` under the task explaining why
+3. Continue with the next available task
+4. Tasks that depend on a failed task will be automatically skipped
+5. If no workable tasks remain, output `<promise>MILESTONE_FAILED</promise>`
 
 ## Error Handling
 
@@ -89,6 +103,23 @@ Use `chief-wiggum_status` anytime to see:
 - Total iterations allowed
 - Active/stopped state
 - Task progress
+
+## Suggested Tasks
+
+If you discover work that should be done but isn't in the task list, suggest it using XML tags in your output:
+
+```text
+<suggest-task>Description of the task</suggest-task>
+<suggest-task milestone="M2b">Task for a specific milestone</suggest-task>
+```
+
+Use `chief-wiggum_suggested_tasks` to review previously suggested tasks.
+
+## Logs & Archiving
+
+- `chief-wiggum_summary` - Get raw logs from the current session for analysis
+- `chief-wiggum_logs` - List or read archived log files
+- `chief-wiggum_archive_logs` - Move current logs to archive to start fresh
 
 ## Important Rules
 

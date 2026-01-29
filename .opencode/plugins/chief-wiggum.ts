@@ -278,11 +278,11 @@ const get_context = tool({
 
 const mark_task = tool({
 	description:
-		"Mark a task's status in the structured tasks file. Use this to mark tasks as in-progress, complete, or todo.",
+		"Mark a task's status in the structured tasks file. Use this to mark tasks as in-progress, complete, failed, or todo.",
 	args: {
 		taskId: tool.schema.string().describe("The ID of the task to mark"),
 		status: tool.schema
-			.enum(["todo", "in-progress", "complete"])
+			.enum(["todo", "in-progress", "complete", "failed"])
 			.describe("The new status for the task"),
 	},
 	async execute(args) {
@@ -340,46 +340,20 @@ const stop = tool({
 
 const summary = tool({
 	description:
-		"Analyze ALL current log files from the chief-wiggum logs folder. Returns detailed analysis including: iteration stats, tasks completed/started, tool usage, errors, repeated patterns, and actionable suggestions for prompt improvements. Use archive_logs to move old logs to archive before starting fresh.",
-	args: {
-		raw: tool.schema
-			.boolean()
-			.optional()
-			.describe("Include raw log content in addition to analysis (default: false)"),
-	},
-	async execute(args) {
-		const path = args.raw ? "/summary?raw=true" : "/summary";
-		
+		"Get raw log content from current chief-wiggum logs for LLM analysis. Returns log files with an analysis prompt. Use archive_logs to move old logs to archive before starting fresh.",
+	args: {},
+	async execute() {
 		const result = await fetchJson<{
 			files: string[];
 			fileCount: number;
-			analysis: {
-				iterations: number;
-				totalDuration: string;
-				totalDurationSeconds: number;
-				avgIterationSeconds: number;
-				tasksCompleted: string[];
-				tasksStarted: string[];
-				toolUsage: Record<string, number>;
-				totalToolCalls: number;
-				errors: Array<{ error: string; count: number; firstSeen: string }>;
-				repeatedPatterns: Array<{ pattern: string; count: number; suggestion: string }>;
-				suggestions: string[];
-				iterationDetails: Array<{
-					number: number;
-					duration: string;
-					tools: Record<string, number>;
-					exitCode: number | null;
-					completed: boolean;
-					taskId: string | null;
-				}>;
-				filesModified: string[];
-				completionRate: number;
-				avgToolsPerIteration: number;
+			content: string;
+			totalBytes: number;
+			configFiles?: {
+				promptFile: string | null;
+				tasksFile: string | null;
 			};
-			rawContent?: string;
 			error?: string;
-		}>(path);
+		}>("/logs/raw");
 
 		if (result.error) {
 			return `Error: ${result.error}`;
@@ -389,100 +363,53 @@ const summary = tool({
 			return `Error: ${result.data.error}`;
 		}
 
-		const a = result.data?.analysis;
-		if (!a) {
-			return "No analysis available";
+		if (!result.data?.content || result.data.fileCount === 0) {
+			return "No log files found. Run some iterations first, or check if logs are in the archive.";
 		}
 
-		let output = `# Chief Wiggum Log Analysis\n\n`;
-		
-		// Overview stats
-		output += `## Overview\n`;
-		output += `| Metric | Value |\n`;
-		output += `|--------|-------|\n`;
-		output += `| Log Files | ${result.data?.fileCount} |\n`;
-		output += `| Total Iterations | ${a.iterations} |\n`;
-		output += `| Total Duration | ${a.totalDuration} (${Math.round(a.totalDurationSeconds / 60)} min) |\n`;
-		output += `| Avg Iteration | ${Math.round(a.avgIterationSeconds / 60)}m ${a.avgIterationSeconds % 60}s |\n`;
-		output += `| Completion Rate | ${a.completionRate}% |\n`;
-		output += `| Total Tool Calls | ${a.totalToolCalls} |\n`;
-		output += `| Avg Tools/Iteration | ${a.avgToolsPerIteration} |\n\n`;
+		const promptFile = result.data.configFiles?.promptFile || "docs/prompt.md";
+		const tasksFile = result.data.configFiles?.tasksFile || "docs/tasks.md";
 
-		// Tool usage breakdown
-		if (Object.keys(a.toolUsage).length > 0) {
-			output += `## Tool Usage\n`;
-			const sortedTools = Object.entries(a.toolUsage).sort((x, y) => y[1] - x[1]);
-			for (const [tool, count] of sortedTools) {
-				const pct = Math.round((count / a.totalToolCalls) * 100);
-				output += `- **${tool}**: ${count} (${pct}%)\n`;
-			}
-			output += `\n`;
-		}
+		const analysisPrompt = `Analyze these chief-wiggum iteration logs and provide:
 
-		// Tasks
-		output += `## Tasks\n`;
-		output += `- **Completed (${a.tasksCompleted.length})**: ${a.tasksCompleted.join(", ") || "none"}\n`;
-		if (a.tasksStarted.length > 0) {
-			output += `- **Started but not completed (${a.tasksStarted.length})**: ${a.tasksStarted.join(", ")}\n`;
-		}
-		output += `\n`;
+1. **Summary of Work**
+   - Tasks completed (look for "Task X marked as complete")
+   - Files modified
+   - Key accomplishments
 
-		// Files modified
-		if (a.filesModified.length > 0) {
-			output += `## Files Modified (${a.filesModified.length})\n`;
-			output += a.filesModified.slice(0, 20).join(", ");
-			if (a.filesModified.length > 20) {
-				output += ` ... and ${a.filesModified.length - 20} more`;
-			}
-			output += `\n\n`;
-		}
+2. **Errors & Issues**
+   - List unique errors with frequency
+   - Which iteration each error first appeared
 
-		// Errors
-		if (a.errors.length > 0) {
-			output += `## Errors (${a.errors.length} unique)\n`;
-			for (const { error, count, firstSeen } of a.errors) {
-				output += `- **(${count}x)** [${firstSeen}] ${error}\n`;
-			}
-			output += `\n`;
-		}
+3. **Inefficiency Patterns** (MOST IMPORTANT)
+   - Same file read multiple times across iterations
+   - Same test/command run repeatedly
+   - Repeated failed attempts at the same thing
+   - Unnecessary re-exploration of code already understood
 
-		// Repeated patterns - THE KEY INSIGHTS
-		if (a.repeatedPatterns.length > 0) {
-			output += `## ⚠️ Inefficiency Patterns Detected\n`;
-			output += `These patterns indicate work being repeated unnecessarily. Consider adding to your prompt file:\n\n`;
-			for (const { pattern, count, suggestion } of a.repeatedPatterns) {
-				output += `### ${pattern} (${count}x)\n`;
-				output += `**Suggestion:** ${suggestion}\n\n`;
-			}
-		}
+4. **Actionable Suggestions**
+   - Specific text to add to the prompt file to prevent repeated work
+   - Example: "After running tests, cache the results and don't re-run unless files change"
 
-		// Actionable suggestions
-		if (a.suggestions.length > 0) {
-			output += `## 📋 Actionable Suggestions for Prompt\n`;
-			for (let i = 0; i < a.suggestions.length; i++) {
-				output += `${i + 1}. ${a.suggestions[i]}\n`;
-			}
-			output += `\n`;
-		}
+5. **Stats**
+   - Number of iterations
+   - Approximate time per iteration
+   - Tool usage breakdown (which tools used most)
 
-		// Recent iterations detail
-		if (a.iterationDetails.length > 0) {
-			output += `## Recent Iterations (last ${a.iterationDetails.length})\n`;
-			output += `| # | Duration | Tools | Exit | Task |\n`;
-			output += `|---|----------|-------|------|------|\n`;
-			for (const iter of a.iterationDetails.slice(-10)) {
-				const toolStr = Object.entries(iter.tools).map(([t, c]) => `${t}:${c}`).join(" ") || "-";
-				const status = iter.completed ? "✅" : (iter.exitCode === 0 ? "🔄" : "❌");
-				output += `| ${iter.number} | ${iter.duration} | ${toolStr} | ${status} | ${iter.taskId || "-"} |\n`;
-			}
-			output += `\n`;
-		}
+## Configuration Files
 
-		if (result.data?.rawContent) {
-			output += `## Raw Log Content\n\`\`\`\n${result.data.rawContent}\n\`\`\`\n`;
-		}
+After analysis, if the user asks you to update the config files, these are the key files:
 
-		return output;
+- **\`${promptFile}\`** - The main prompt file. Add instructions here to prevent inefficiencies found in logs.
+- **\`${tasksFile}\`** - Structured task list with milestones.
+
+When suggesting prompt improvements, provide the exact text to add to \`${promptFile}\`.
+
+<logs file_count="${result.data.fileCount}" total_bytes="${result.data.totalBytes}">
+${result.data.content}
+</logs>`;
+
+		return analysisPrompt;
 	},
 });
 
@@ -493,11 +420,15 @@ const logs = tool({
 		file: tool.schema
 			.string()
 			.optional()
-			.describe("Specific archived log file name to read (omit to list available files)"),
+			.describe(
+				"Specific archived log file name to read (omit to list available files)",
+			),
 	},
 	async execute(args) {
-		const path = args.file ? `/logs?file=${encodeURIComponent(args.file)}` : "/logs";
-		
+		const path = args.file
+			? `/logs?file=${encodeURIComponent(args.file)}`
+			: "/logs";
+
 		const result = await fetchJson<{
 			archiveDir?: string;
 			archivedFiles?: string[];
@@ -520,7 +451,10 @@ const logs = tool({
 		// If listing files
 		if (result.data?.archivedFiles !== undefined) {
 			if (result.data.archivedFiles.length === 0) {
-				return result.data.message || "No archived log files found. Use archive_logs to archive current logs.";
+				return (
+					result.data.message ||
+					"No archived log files found. Use archive_logs to archive current logs."
+				);
 			}
 			let output = `## Archived Log Files (${result.data.count})\n\n`;
 			output += `Archive directory: ${result.data.archiveDir}\n\n`;
@@ -571,7 +505,7 @@ const archive_logs = tool({
 
 		let output = `## Logs Archived\n\n`;
 		output += `Archived ${result.data?.archivedCount} file(s) to ${result.data?.archiveDir}\n`;
-		
+
 		if (result.data?.archived && result.data.archived.length > 0) {
 			output += `\nArchived files:\n`;
 			for (const file of result.data.archived) {
@@ -590,12 +524,36 @@ const archive_logs = tool({
 	},
 });
 
+const suggested_tasks = tool({
+	description:
+		"Get suggested tasks discovered during iterations. These are tasks the agent suggested via <suggest-task> tags that aren't in the main task list.",
+	args: {},
+	async execute() {
+		const result = await fetchJson<{
+			path: string;
+			content: string | null;
+			message?: string;
+		}>("/suggested-tasks");
+
+		if (result.error) {
+			return `Error: ${result.error}`;
+		}
+
+		if (!result.data?.content) {
+			return result.data?.message || "No suggested tasks found.";
+		}
+
+		return result.data.content;
+	},
+});
+
 export const ChiefWiggumPlugin = async () => ({
 	tool: {
 		status,
 		summary,
 		logs,
 		archive_logs,
+		suggested_tasks,
 		start_loop,
 		complete_iteration,
 		next_task,
