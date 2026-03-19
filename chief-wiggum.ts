@@ -407,6 +407,7 @@ Usage:
 
 Commands:
   run              Start the Ralph loop (default)
+  serve            Start HTTP server only (for OpenCode subagent mode)
   status           Show loop status and history  
   context <text>   Add context for next iteration
   tasks            List/manage tasks
@@ -2736,6 +2737,7 @@ function logRequest(method: string, path: string, status: number): void {
 }
 
 function startHttpServer(port: number): ReturnType<typeof Bun.serve> {
+	const serverStartedAt = Date.now();
 	const server = Bun.serve<WSData>({
 		port,
 		fetch(req, server) {
@@ -2776,6 +2778,7 @@ function startHttpServer(port: number): ReturnType<typeof Bun.serve> {
 					response = jsonResponse({
 						status: "healthy",
 						version: VERSION,
+						uptime: Date.now() - serverStartedAt,
 					});
 				} else if (method === "GET" && path === "/tasks") {
 					if (structuredTasksFile) {
@@ -3216,6 +3219,279 @@ function startHttpServer(port: number): ReturnType<typeof Bun.serve> {
 							400,
 						);
 					}
+				} else if (method === "POST" && path === "/start") {
+					return (async () => {
+						try {
+							const body = await req.json();
+							const promptFile = body.promptFile as string | undefined;
+							const promptText = body.prompt as string | undefined;
+							const tasksFile = body.tasksFile as string | undefined;
+							const milestone = body.milestone as string | undefined;
+
+							let prompt = promptText || "";
+							if (promptFile) {
+								const fullPath = join(workspaceRoot, promptFile);
+								if (existsSync(fullPath)) {
+									prompt = readFileSync(fullPath, "utf-8");
+								} else {
+									return jsonResponse(
+										{
+											success: false,
+											error: `Prompt file not found: ${promptFile}`,
+										},
+										404,
+									);
+								}
+							}
+
+							if (!prompt) {
+								return jsonResponse(
+									{ success: false, error: "No prompt provided" },
+									400,
+								);
+							}
+
+							if (tasksFile) {
+								structuredTasksFile = tasksFile;
+							}
+							if (milestone) {
+								milestoneFilter = milestone;
+							}
+
+							const loopId = `loop-${Date.now()}`;
+							const state: RalphState = {
+								active: true,
+								iteration: 1,
+								maxIterations: 0,
+								completionPromise: "COMPLETE",
+								tasksMode: !!tasksFile,
+								taskPromise: "READY_FOR_NEXT_TASK",
+								prompt,
+								promptFile: promptFile || null,
+								startedAt: new Date().toISOString(),
+								model: "anthropic/claude-opus-4-5",
+								agent: "opencode",
+								workspaceRoot,
+								structuredTasksFile,
+								milestoneFilter,
+								loopId,
+							};
+							saveState(state);
+
+							const history: RalphHistory = {
+								iterations: [],
+								totalDurationMs: 0,
+								struggleIndicators: {
+									repeatedErrors: {},
+									noProgressIterations: 0,
+									shortIterations: 0,
+								},
+							};
+							saveHistory(history);
+
+							const builtPrompt = buildPrompt(state, AGENTS.opencode);
+							const nextTask = getNextStructuredTask(milestoneFilter);
+
+							wsManager.broadcast({
+								type: "loop.started",
+								loopId,
+								prompt: builtPrompt,
+								task: nextTask || undefined,
+							});
+
+							console.log(`\n\u{1F680} Loop started via HTTP (${loopId})`);
+
+							return jsonResponse({
+								success: true,
+								loopId,
+								prompt: builtPrompt,
+								task: nextTask
+									? {
+											id: nextTask.id,
+											title: nextTask.title,
+											status: nextTask.status,
+										}
+									: undefined,
+								iteration: 1,
+							});
+						} catch {
+							return jsonResponse(
+								{ success: false, error: "Invalid JSON body" },
+								400,
+							);
+						}
+					})();
+				} else if (method === "POST" && path === "/iteration/complete") {
+					return (async () => {
+						try {
+							const body = await req.json();
+							const filesModified = (body.filesModified as string[]) || [];
+							const errors = (body.errors as string[]) || [];
+							const _notes = body.notes as string | undefined;
+							const completionDetected = !!body.completionDetected;
+
+							const state = loadState();
+							if (!state?.active) {
+								return jsonResponse(
+									{ success: false, error: "No active loop" },
+									400,
+								);
+							}
+
+							const history = loadHistory();
+							const now = new Date();
+							const iterStart =
+								history.iterations.length > 0
+									? history.iterations[history.iterations.length - 1].endedAt
+									: state.startedAt;
+							const durationMs = now.getTime() - new Date(iterStart).getTime();
+
+							history.iterations.push({
+								iteration: state.iteration,
+								startedAt: iterStart,
+								endedAt: now.toISOString(),
+								durationMs,
+								toolsUsed: {},
+								filesModified,
+								exitCode: 0,
+								completionDetected,
+								errors,
+							});
+							history.totalDurationMs += durationMs;
+
+							const madeProgress =
+								filesModified.length > 0 || completionDetected;
+							if (!madeProgress)
+								history.struggleIndicators.noProgressIterations++;
+							else history.struggleIndicators.noProgressIterations = 0;
+
+							if (durationMs < 30000)
+								history.struggleIndicators.shortIterations++;
+							else history.struggleIndicators.shortIterations = 0;
+
+							if (errors.length === 0)
+								history.struggleIndicators.repeatedErrors = {};
+							else {
+								for (const error of errors) {
+									const key = error.substring(0, 100);
+									history.struggleIndicators.repeatedErrors[key] =
+										(history.struggleIndicators.repeatedErrors[key] || 0) + 1;
+								}
+							}
+							saveHistory(history);
+
+							wsManager.broadcast({
+								type: "iteration.completed",
+								iteration: state.iteration,
+								result: history.iterations[history.iterations.length - 1],
+							});
+
+							if (!state.active) {
+								return jsonResponse({
+									success: true,
+									next: "stop",
+									iteration: state.iteration,
+								});
+							}
+
+							if (
+								state.tasksMode &&
+								allStructuredTasksComplete(milestoneFilter)
+							) {
+								clearState();
+								clearHistory();
+								clearContext();
+								wsManager.broadcast({
+									type: "loop.completed",
+									history,
+									loopId: state.loopId || "",
+								});
+								return jsonResponse({
+									success: true,
+									next: "complete",
+									iteration: state.iteration,
+								});
+							}
+
+							state.iteration++;
+							saveState(state);
+
+							const builtPrompt = buildPrompt(state, AGENTS.opencode);
+							const nextTask = getNextStructuredTask(milestoneFilter);
+
+							return jsonResponse({
+								success: true,
+								next: "continue",
+								iteration: state.iteration,
+								task: nextTask
+									? {
+											id: nextTask.id,
+											title: nextTask.title,
+											status: nextTask.status,
+										}
+									: undefined,
+								prompt: builtPrompt,
+							});
+						} catch {
+							return jsonResponse(
+								{ success: false, error: "Invalid JSON body" },
+								400,
+							);
+						}
+					})();
+				} else if (method === "GET" && path === "/next-task") {
+					if (!structuredTasksFile) {
+						response = jsonResponse({
+							hasTask: false,
+							complete: false,
+							reason: "No tasks file configured",
+						});
+					} else if (allStructuredTasksComplete(milestoneFilter)) {
+						response = jsonResponse({
+							hasTask: false,
+							complete: true,
+							reason: "All tasks are complete",
+						});
+					} else {
+						const task = getNextStructuredTask(milestoneFilter);
+						if (task) {
+							response = jsonResponse({
+								hasTask: true,
+								complete: false,
+								task: {
+									id: task.id,
+									title: task.title,
+									milestone: task.milestone,
+									status: task.status,
+									depends: task.depends,
+									verify: task.verify,
+								},
+							});
+						} else {
+							const failure = isMilestoneFailed(milestoneFilter);
+							response = jsonResponse({
+								hasTask: false,
+								complete: false,
+								reason: failure.failed
+									? "Remaining tasks are blocked by failed dependencies"
+									: "No available tasks",
+							});
+						}
+					}
+				} else if (method === "GET" && path === "/context") {
+					const ctx = loadContext();
+					if (ctx) {
+						clearContext();
+						response = jsonResponse({
+							hasContext: true,
+							context: ctx,
+							clearedAt: new Date().toISOString(),
+						});
+					} else {
+						response = jsonResponse({ hasContext: false, context: null });
+					}
+				} else if (method === "GET" && path === "/history") {
+					response = jsonResponse(loadHistory());
 				} else {
 					response = jsonResponse({ error: "Not found" }, 404);
 				}
@@ -3245,6 +3521,72 @@ function startHttpServer(port: number): ReturnType<typeof Bun.serve> {
 }
 
 // ============================================================================
+// Command: serve
+// ============================================================================
+
+async function cmdServe(
+	flags: Record<string, string | boolean>,
+): Promise<void> {
+	if (flags.workspace) workspaceRoot = flags.workspace as string;
+	if (flags.tasksFile) structuredTasksFile = flags.tasksFile as string;
+	if (flags.milestone) milestoneFilter = flags.milestone as string;
+
+	if (!structuredTasksFile) {
+		const defaultTasksFile = "docs/tasks.md";
+		if (existsSync(defaultTasksFile)) {
+			structuredTasksFile = defaultTasksFile;
+		}
+	}
+
+	const port = parseInt((flags.port as string) || "3456", 10);
+	if (flags.force) {
+		try {
+			const result = Bun.spawnSync(["lsof", "-ti", `:${port}`]);
+			const pids = new TextDecoder()
+				.decode(result.stdout)
+				.trim()
+				.split("\n")
+				.filter(Boolean);
+			for (const pid of pids) {
+				process.kill(parseInt(pid, 10), "SIGKILL");
+			}
+			if (pids.length > 0) {
+				console.log(
+					`\u26A0\uFE0F  Killed ${pids.length} process(es) on port ${port}`,
+				);
+			}
+		} catch {}
+	}
+
+	startHttpServer(port);
+
+	console.log(`
+\u2554${"\u2550".repeat(66)}\u2557
+\u2551                  Chief Wiggum - Server Mode                       \u2551
+\u255A${"\u2550".repeat(66)}\u255D
+`);
+	console.log(`\u{1F310} HTTP server running on http://localhost:${port}`);
+	console.log("");
+	console.log("Endpoints:");
+	console.log("  POST /start              - Start a loop");
+	console.log("  POST /iteration/complete - Complete an iteration");
+	console.log("  GET  /next-task          - Get next available task");
+	console.log("  GET  /context            - Get and clear pending context");
+	console.log("  POST /context            - Inject context");
+	console.log("  POST /task/mark          - Update task status");
+	console.log("  GET  /status             - Loop status");
+	console.log("  GET  /history            - Iteration history");
+	console.log("  GET  /health             - Health check");
+	console.log("  POST /stop               - Stop the loop");
+	console.log("  WS   /events             - WebSocket events");
+	console.log("");
+	console.log("Waiting for connections... (Ctrl+C to stop)");
+	console.log("\u2550".repeat(68));
+
+	await new Promise(() => {});
+}
+
+// ============================================================================
 // Code Review
 // ============================================================================
 
@@ -3261,11 +3603,45 @@ async function runCodeReview(
 		return null;
 	}
 
+	const claudePath = Bun.which("claude");
+	if (!claudePath) return null;
+
+	let diff: string;
+	try {
+		diff = await $`git diff main...HEAD`.cwd(workspaceDir).text();
+		if (!diff.trim()) return null;
+	} catch {
+		return null;
+	}
+
+	let reviewInstructions = "";
+	try {
+		const agentFile = join(
+			workspaceDir,
+			".opencode",
+			"agents",
+			"code-reviewer.md",
+		);
+		if (existsSync(agentFile)) {
+			const raw = readFileSync(agentFile, "utf-8");
+			reviewInstructions = raw.replace(/^---[\s\S]*?---\n*/, "");
+		}
+	} catch {}
+
+	if (!reviewInstructions) {
+		reviewInstructions =
+			"Review the diff for bloat, low-value tests, and unnecessary custom components.";
+	}
+
+	const prompt = `${reviewInstructions}\n\n## Diff\n\n\`\`\`diff\n${diff}\n\`\`\``;
+
 	console.log("\u{1F50D} Running code review...");
+
+	const reviewTimeout = Math.min(timeoutMs, 5 * 60 * 1000);
 
 	try {
 		const proc = Bun.spawn(
-			["opencode", "run", "-m", "anthropic/claude-opus-4-5", "@code-reviewer"],
+			["claude", "-p", prompt, "--model", "claude-opus-4-5-20250514"],
 			{
 				cwd: workspaceDir,
 				env: { ...process.env },
@@ -3279,7 +3655,7 @@ async function runCodeReview(
 			try {
 				proc.kill("SIGKILL");
 			} catch {}
-		}, timeoutMs);
+		}, reviewTimeout);
 
 		const output = await new Response(
 			proc.stdout as ReadableStream<Uint8Array>,
@@ -3289,7 +3665,7 @@ async function runCodeReview(
 
 		return output;
 	} catch {
-		console.log("\u26A0\uFE0F  Code review skipped (opencode unavailable)");
+		console.log("\u26A0\uFE0F  Code review skipped (claude unavailable)");
 		return null;
 	}
 }
@@ -3961,6 +4337,9 @@ async function main(): Promise<void> {
 			break;
 		case "assist":
 			await cmdAssist(parsed.flags);
+			break;
+		case "serve":
+			await cmdServe(parsed.flags);
 			break;
 		default:
 			await cmdRun(parsed.args, parsed.flags);
