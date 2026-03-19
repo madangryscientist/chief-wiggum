@@ -29,7 +29,7 @@ Tests must assert meaningful behaviour. Flag:
 - Missing tests for non-trivial logic paths
 
 ### 3. Use Existing Components
-Before flagging, read the design docs in `docs/` and `CLAUDE.md` to understand what components and utilities already exist. Flag:
+Before flagging, read the design docs in `docs/` and `AGENTS.md` to understand what components and utilities already exist. Flag:
 - Custom implementations of something already available in the codebase
 - New UI components where an existing design system component would work
 - Utility functions that duplicate existing helpers
@@ -37,7 +37,7 @@ Before flagging, read the design docs in `docs/` and `CLAUDE.md` to understand w
 ## Process
 
 1. Run `git diff main...HEAD` to get the full diff
-2. Read `CLAUDE.md` and relevant files in `docs/` to understand the project's existing components and conventions
+2. Read `AGENTS.md` and relevant files in `docs/` to understand the project's existing components and conventions
 3. For any flagged issues, identify the exact file and line from the diff
 4. Write a concise findings report in markdown
 
