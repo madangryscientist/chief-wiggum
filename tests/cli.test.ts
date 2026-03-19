@@ -46,7 +46,17 @@ const FLAG_DEFS: Record<string, FlagDef> = {
 	"--clear": { key: "clear", hasValue: false },
 };
 
-const COMMANDS = ["run", "status", "context", "tasks"];
+const COMMANDS = [
+	"run",
+	"serve",
+	"status",
+	"context",
+	"tasks",
+	"logs",
+	"summary",
+	"stop",
+	"assist",
+];
 
 function parseArgs(argv: string[]): ParsedArgs {
 	const result: ParsedArgs = { command: "", args: [], flags: {} };

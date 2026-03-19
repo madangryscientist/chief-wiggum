@@ -9,7 +9,7 @@
 	"scripts": {
 		"start": "bun ralph.ts",
 		"build": "bun build ralph.ts --outfile bin/ralph --compile",
-		"test": "bun test ./tests/ralph.test.ts",
+		"test": "bun test ./tests/",
 		"install-local": "bun link",
 		"format": "biome check --write",
 		"format:check": "biome check"
