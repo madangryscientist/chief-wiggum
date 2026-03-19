@@ -3603,37 +3603,8 @@ async function runCodeReview(
 		return null;
 	}
 
-	const claudePath = Bun.which("claude");
-	if (!claudePath) return null;
-
-	let diff: string;
-	try {
-		diff = await $`git diff main...HEAD`.cwd(workspaceDir).text();
-		if (!diff.trim()) return null;
-	} catch {
-		return null;
-	}
-
-	let reviewInstructions = "";
-	try {
-		const agentFile = join(
-			workspaceDir,
-			".opencode",
-			"agents",
-			"code-reviewer.md",
-		);
-		if (existsSync(agentFile)) {
-			const raw = readFileSync(agentFile, "utf-8");
-			reviewInstructions = raw.replace(/^---[\s\S]*?---\n*/, "");
-		}
-	} catch {}
-
-	if (!reviewInstructions) {
-		reviewInstructions =
-			"Review the diff for bloat, low-value tests, and unnecessary custom components.";
-	}
-
-	const prompt = `${reviewInstructions}\n\n## Diff\n\n\`\`\`diff\n${diff}\n\`\`\``;
+	const opencodePath = Bun.which("opencode");
+	if (!opencodePath) return null;
 
 	console.log("\u{1F50D} Running code review...");
 
@@ -3641,7 +3612,15 @@ async function runCodeReview(
 
 	try {
 		const proc = Bun.spawn(
-			["claude", "-p", prompt, "--model", "claude-opus-4-5-20250514"],
+			[
+				"opencode",
+				"run",
+				"--agent",
+				"code-reviewer",
+				"-m",
+				"anthropic/claude-opus-4-6",
+				"Review the current branch changes against main",
+			],
 			{
 				cwd: workspaceDir,
 				env: { ...process.env },
@@ -3665,7 +3644,7 @@ async function runCodeReview(
 
 		return output;
 	} catch {
-		console.log("\u26A0\uFE0F  Code review skipped (claude unavailable)");
+		console.log("\u26A0\uFE0F  Code review skipped (opencode unavailable)");
 		return null;
 	}
 }
@@ -4219,8 +4198,8 @@ Completion: ${completionDetected ? "detected" : "not detected"}
 				} catch {}
 			}
 
-			// Code review after each iteration (opencode agent only)
-			if (opts.agent === "opencode") {
+			// Code review after each iteration
+			{
 				const reviewOutput = await runCodeReview(
 					workspaceRoot,
 					opts.timeout * 60 * 1000,
