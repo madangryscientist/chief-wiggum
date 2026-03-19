@@ -3854,7 +3854,17 @@ Completion: ${completionDetected ? "detected" : "not detected"}
 						/<review-result>\s*ISSUES\s*<\/review-result>/i.test(reviewOutput)
 					) {
 						console.log("⚠️  Review found issues — injecting as context");
-						saveContext(reviewOutput);
+						const timestamp = new Date().toISOString();
+						const entry = `\n## Code review at ${timestamp}\n${reviewOutput}\n`;
+						const contextPath = getContextPath();
+						if (existsSync(contextPath)) {
+							writeFileSync(
+								contextPath,
+								readFileSync(contextPath, "utf-8") + entry,
+							);
+						} else {
+							writeFileSync(contextPath, `# Ralph Loop Context\n${entry}`);
+						}
 					} else if (
 						/<review-result>\s*PASS\s*<\/review-result>/i.test(reviewOutput)
 					) {
