@@ -3245,6 +3245,56 @@ function startHttpServer(port: number): ReturnType<typeof Bun.serve> {
 }
 
 // ============================================================================
+// Code Review
+// ============================================================================
+
+async function runCodeReview(
+	workspaceDir: string,
+	timeoutMs: number,
+): Promise<string | null> {
+	try {
+		const ahead = await $`git rev-list main..HEAD --count`
+			.cwd(workspaceDir)
+			.text();
+		if (parseInt(ahead.trim(), 10) === 0) return null;
+	} catch {
+		return null;
+	}
+
+	console.log("\u{1F50D} Running code review...");
+
+	try {
+		const proc = Bun.spawn(
+			["opencode", "run", "-m", "anthropic/claude-opus-4-5", "@code-reviewer"],
+			{
+				cwd: workspaceDir,
+				env: { ...process.env },
+				stdin: "ignore",
+				stdout: "pipe",
+				stderr: "ignore",
+			},
+		);
+
+		const timeoutHandle = setTimeout(() => {
+			try {
+				proc.kill("SIGKILL");
+			} catch {}
+		}, timeoutMs);
+
+		const output = await new Response(
+			proc.stdout as ReadableStream<Uint8Array>,
+		).text();
+		await proc.exited;
+		clearTimeout(timeoutHandle);
+
+		return output;
+	} catch {
+		console.log("\u26A0\uFE0F  Code review skipped (opencode unavailable)");
+		return null;
+	}
+}
+
+// ============================================================================
 // Command: run
 // ============================================================================
 
@@ -3791,6 +3841,26 @@ Completion: ${completionDetected ? "detected" : "not detected"}
 						console.log(`📝 Auto-committed`);
 					}
 				} catch {}
+			}
+
+			// Code review after each iteration (opencode agent only)
+			if (opts.agent === "opencode") {
+				const reviewOutput = await runCodeReview(
+					workspaceRoot,
+					opts.timeout * 60 * 1000,
+				);
+				if (reviewOutput) {
+					if (
+						/<review-result>\s*ISSUES\s*<\/review-result>/i.test(reviewOutput)
+					) {
+						console.log("⚠️  Review found issues — injecting as context");
+						saveContext(reviewOutput);
+					} else if (
+						/<review-result>\s*PASS\s*<\/review-result>/i.test(reviewOutput)
+					) {
+						console.log("✅ Code review passed");
+					}
+				}
 			}
 
 			state.iteration++;
